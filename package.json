@@ -1,0 +1,72 @@
+{
+  "name": "@vinoskey524/panda",
+  "version": "1.0.1",
+  "module": "main.ts",
+  "type": "module",
+  "description": "Advanced JSON-based state manager for React and React Native (Bare and Expo).",
+  "exports": {
+    "import": {
+      "types": "./dist/main.d.ts",
+      "default": "./dist/main.js"
+    }
+  },
+  "types": "./dist/main.d.ts",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vinoskey524/panda.git"
+  },
+  "author": "Hamet Kévin E. ODOUTAN - @vinoskey524",
+  "bugs": {
+    "url": "https://github.com/vinoskey524/panda/issues"
+  },
+  "homepage": "https://github.com/vinoskey524/panda#readme",
+  "keywords": [
+    "panda",
+    "redux",
+    "store",
+    "zustand",
+    "state manager",
+    "management",
+    "oh-my-json",
+    "json",
+    "data",
+    "manipulation",
+    "react",
+    "react-native",
+    "expo",
+    "native",
+    "preact",
+    "angular",
+    "vue",
+    "svelte",
+    "node",
+    "deno",
+    "bun",
+    "javascript",
+    "typescript",
+    "library",
+    "software",
+    "latest",
+    "new"
+  ],
+  "license": "MIT",
+  "scripts": {
+    "s": "clear && bun run src/main.ts",
+    "t": "clear && bun run src/test.ts",
+    "b": "clear && tsup src/main.ts --format esm --dts && esbuild dist/main.js --bundle --minify --format=esm --platform=node --outfile=dist/main.mjs --keep-names --allow-overwrite",
+    "p": "clear && npm publish --access public",
+    "f": "clear && npm info panda"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5.0.0",
+    "react": ">=18"
+  },
+  "dependencies": {
+    "@vinoskey524/oh-my-json": "^1.0.1",
+    "esbuild": "^0.25.10",
+    "tsup": "^8.5.0"
+  }
+}

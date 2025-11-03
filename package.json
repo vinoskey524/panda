@@ -1,6 +1,6 @@
 {
   "name": "@vinoskey524/panda",
-  "version": "1.0.1",
+  "version": "1.0.7",
   "module": "main.ts",
   "type": "module",
   "description": "Advanced JSON-based state manager for React and React Native (Bare and Expo).",
@@ -55,7 +55,7 @@
     "t": "clear && bun run src/test.ts",
     "b": "clear && tsup src/main.ts --format esm --dts && esbuild dist/main.js --bundle --minify --format=esm --platform=node --outfile=dist/main.mjs --keep-names --allow-overwrite",
     "p": "clear && npm publish --access public",
-    "f": "clear && npm info panda"
+    "f": "clear && npm info @vinoskey524/panda"
   },
   "devDependencies": {
     "@types/bun": "latest"

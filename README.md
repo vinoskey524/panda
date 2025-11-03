@@ -5,6 +5,7 @@ Advanced JSON-based state manager for React and React Native (Bare and Expo).
 ## Table of contents
 
 - [Installation](#installation)
+- [What's panda](#whats-panda)
 - [API Documentation](#api-documentation)
     - [import](#import)
     - [set](#set)
@@ -40,6 +41,10 @@ $ pnpm add @vinoskey524/panda
 $ bun add @vinoskey524/panda
 ```
 
+## What's Panda 
+
+Panda is a powerful software that allows you to manage the states of your applications with incredible ease and flexibility, no matter the size or complexity of your apps. Unlike other state managers, it uses a single JSON data source and notifies in real time of any change occurring at any field level, no matter the depth. It's as simple as that!
+
 ## API Documentation
 
 >Note: Pay a good attention to the comments inside the code sections.
@@ -47,9 +52,9 @@ $ bun add @vinoskey524/panda
 ### **import**
 
 ```ts
-import Panda from 'panda';
+import Panda from '@vinoskey524/panda';
 // or
-import { store, get, usePanda, preserve, watch, unwatch, genID, inspectShortcuts } from 'panda';
+import { store, get, usePanda, preserve, watch, unwatch, genID, inspectShortcuts } from '@vinoskey524/panda';
 ```
 
 ### **set**

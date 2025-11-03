@@ -247,7 +247,7 @@ const generateIdFunc = (): string => {
 };
 
 /** Delay function execution */
-const delayFunc = (x?: { ms?: number }): Promise<void> => { return new Promise(resolve => setTimeout(resolve, x?.ms || 1)) };
+const delayFunc = (x?: { ms?: number }): Promise<void> => { return new Promise(resolve => setTimeout(resolve, x?.ms ?? 1)) };
 
 /** Check if a property exists */
 const hasPropertyFunc = (x: JSON_DEFAULT_TYPE, y: string): boolean => {
@@ -266,7 +266,7 @@ const getPathTypeFunc = (path: string): 'array' | 'json' => (path[0] === '[') &&
 
 /** Get real type */
 const getRealTypeFunc = (data: any, validTypes?: VALID_TYPES_TYPE[]): GET_REAL_TYPE_RETURN_TYPE => {
-    const valids = validTypes || _default_valid_types_;
+    const valids = validTypes ?? _default_valid_types_;
 
     let typ = typeof data;
     if (typ === 'object') typ = ((data === null) ? 'null' : Array.isArray(data) ? 'array' : 'json') as any;
@@ -294,7 +294,7 @@ const jsonAppendDataFunc = (x: { sourceObj: JSON_DEFAULT_TYPE, pathChain: string
 
         for (let n = 0; n < pathTab.length; n++) {
             const currentPath = pathTab[n]; /* current path */
-            const nextPath = pathTab[n + 1] || undefined;
+            const nextPath = pathTab[n + 1] ?? undefined;
 
             /* True if the current path is an array index */
             const isArrayIndex = getPathTypeFunc(currentPath) === 'array';
@@ -702,7 +702,7 @@ const comparePathFunc = (x: { path: string, sourceA: JSON_DEFAULT_TYPE, sourceB:
 };
 
 /** Is preserved */
-const isPreservedFunc = (value: string) => value.includes('$pre_') && value.indexOf('$pre_') === 0;
+const isPreservedFunc = (value: string) => typeof value === 'string' && value.includes('$pre_') && value.indexOf('$pre_') === 0;
 
 /** Update store */
 const updateStoreDataFunc = (x: { pandata: JSON_DEFAULT_TYPE }): FUNCTION_DEFAULT_RETURN_TYPE => {
@@ -744,7 +744,7 @@ const updateStoreDataFunc = (x: { pandata: JSON_DEFAULT_TYPE }): FUNCTION_DEFAUL
                 if (!isSync)
                     throw new Error(`You try to update the value at "${path}" with an async function!`);
                 /* Set update result to "newVal" */
-                let current = storeTopLevelDATA.current[path] || undefined;
+                let current = storeTopLevelDATA.current[path];
                 if (current && isPreservedFunc(current))
                     current = preserveDATA.current[current];
                 const func = val as Function;
@@ -909,7 +909,7 @@ const runWatcherFunctionFunc = (x: { path: string, key: string | null, callback:
     try {
         const key = x.key;
         const pandata = extractPandataFromPathFunc({ path: x.path });
-        x.callback(key, pandata.data || undefined);
+        x.callback(key, pandata.data ?? undefined);
 
     } catch (e: any) { logFunc('Err :: runWatcherFunctionFunc() =>', e.message) }
 };
@@ -1270,7 +1270,7 @@ const reverseTopLevelJsonFunc = (x: { data: JSON_DEFAULT_TYPE }): FUNCTION_DEFAU
             topLevelKeys[target] = keysTab;
 
             /* Set 'top-level' keys inside the collector */
-            const path = keysTab[0].split('.')[1] || undefined;
+            const path = keysTab[0].split('.')[1] ?? undefined;
             if (path) { /* Process top-level keys that are objects */
                 const topLevelKeyType = getPathTypeFunc(path);
                 collector[target] = (topLevelKeyType === 'json') ? {} : [];

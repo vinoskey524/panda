@@ -2,7 +2,7 @@
 *
 * Panda
 *
-* Advanced state manager
+* Advanced JSON-based state manager for React and React Native (Bare and Expo).
 *
 * @vinoskey524 • Hamet Kévin E. ODOUTAN • vinoskey524@gmail.com (Author)
 *

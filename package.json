@@ -1,6 +1,6 @@
 {
   "name": "@vinoskey524/panda",
-  "version": "1.0.7",
+  "version": "1.0.8",
   "module": "main.ts",
   "type": "module",
   "description": "Advanced JSON-based state manager for React and React Native (Bare and Expo).",
@@ -58,15 +58,15 @@
     "f": "clear && npm info @vinoskey524/panda"
   },
   "devDependencies": {
-    "@types/bun": "latest"
+    "@types/bun": "latest",
+    "esbuild": "^0.25.12",
+    "tsup": "^8.5.0"
   },
   "peerDependencies": {
     "typescript": "^5.0.0",
     "react": ">=18"
   },
   "dependencies": {
-    "@vinoskey524/oh-my-json": "^1.0.1",
-    "esbuild": "^0.25.10",
-    "tsup": "^8.5.0"
+    "@vinoskey524/oh-my-json": "^1.0.1"
   }
 }

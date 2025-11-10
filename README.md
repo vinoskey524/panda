@@ -357,7 +357,7 @@ const keyValue = get('randomArray...key');
 console.log('key ::', keyValue);
 
 // For debug purpose
-const inspection = inpectShortcuts();
+const inspection = inspectShortcuts();
 console.log('inspection ::', inspection);
 ```
 

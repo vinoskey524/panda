@@ -8,9 +8,11 @@
 *
 */
 
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 
 /* ---------------------------------------------- Types ---------------------------------------------- */
+
+declare const __DEV__: boolean;
 
 type MAIN_TYPE = {
     init: () => PANDA_TYPE
@@ -237,6 +239,9 @@ const logFunc = (...log: any[]): void => { if (_dev_) console.log(...log) };
 
 /** Permanent log */
 const plogFunc = (...log: any[]): void => { console.log(...log) };
+
+/** Check if the app is in development mode */
+const isDevFunc = (): boolean => (typeof __DEV__ !== 'undefined') ? __DEV__ : process.env.NODE_ENV === 'development';
 
 /** Generate ID */
 const generateIdFunc = (): string => {
@@ -1595,6 +1600,14 @@ const preserveDATAFunc = (pandata: any): any => {
 
 /** "usePanda" Hook */
 export const usePanda = (path: string | string[] | JSON_STRING_TYPE): any => {
+    /* - */
+    const isMounted = useRef(false);
+    const isDev = isDevFunc();
+    const remountingTimer = useRef<any>(null);
+    const cleanUpReady = useRef(false);
+    const again = useRef(false);
+    const [mountAgain, setMountAgain] = useState(again.current);
+
     /* UI Updater */
     const refresher = useRef(false);
     const [_, setRefresh] = useState(refresher.current);
@@ -1603,6 +1616,43 @@ export const usePanda = (path: string | string[] | JSON_STRING_TYPE): any => {
     /* Get pandata & watch every update */
     const watcherId = useRef(generateIdFunc()).current;
     const pandata = getDataFunc(path, refreshFunc, watcherId);
+
+    /* On mount */
+    const onMountFunc = (): any => {
+        /* - */
+        if (isMounted.current) {
+            cleanUpReady.current = true;
+            return () => onUnmountFunc(); /* Clean up */
+        }
+        isMounted.current = true;
+
+        /* Prevent double rendering side effects, caused by "Strict Mode" */
+        if (isDev && !again.current) {
+            again.current = true;
+            delayFunc().then(() => {
+                remountingTimer.current = setTimeout(() => {
+                    if (cleanUpReady.current)
+                        return;
+                    setMountAgain(again.current);
+                }, 50);
+            });
+        }
+
+        /* Clean up */
+        return isDev ? undefined : () => onUnmountFunc();
+    };
+
+    /* On unmount */
+    const onUnmountFunc = (): void => {
+        /* Clear timer */
+        clearTimeout(remountingTimer.current);
+
+        /* - */
+        unwatch(watcherId);
+    };
+
+    /* - */
+    useEffect(onMountFunc, [mountAgain]);
 
     /* Return pandata */
     return pandata;

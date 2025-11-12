@@ -21,7 +21,6 @@ Advanced JSON-based state manager for React and React Native (Bare and Expo).
 - [Performance recommendations](#performance-recommendations)
 - [Author](#author)
 - [Other packages](#other-packages)
-- [Support Me](#support-me)
 - [Contact Me](#contact-me)
 - [License](#license)
 
@@ -483,12 +482,6 @@ Below are other packages from the same author.
 - **[feedlist-react-native](https://npmjs.com/package/@vinoskey524/feedlist-react-native)**: A highly efficient and high-performance feeds renderer, designed for React Native (Bare and Expo).
 
 - **[oh-my-json](https://npmjs.com/package/@vinoskey524/oh-my-json)**: The zenith of JSON manipulation.
-
-## Support Me
-
-Please help sustain my open-source projects. Every donation makes a difference.
-
-**[Support Me ❤️](https://hcfrgory.mychariow.com/)**
 
 ## Contact Me
 

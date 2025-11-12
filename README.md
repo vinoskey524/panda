@@ -478,7 +478,9 @@ Below are other packages from the same author.
 
 - **[illisible](https://npmjs.com/package/illisible)**: A powerful and high-performance cross-runtime encryption software.
 
-- **[feedlist](https://npmjs.com/package/feedlist)**: A highly efficient and high-performance feeds renderer, designed for React and React Native (Bare and Expo).
+- **[feedlist-react](https://npmjs.com/package/@vinoskey524/feedlist-react)**: A highly efficient and high-performance feeds renderer, designed for React.
+
+- **[feedlist-react-native](https://npmjs.com/package/@vinoskey524/feedlist-react-native)**: A highly efficient and high-performance feeds renderer, designed for React Native (Bare and Expo).
 
 - **[oh-my-json](https://npmjs.com/package/@vinoskey524/oh-my-json)**: The zenith of JSON manipulation.
 

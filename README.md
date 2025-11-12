@@ -2,6 +2,8 @@
 
 Advanced JSON-based state manager for React and React Native (Bare and Expo).
 
+[Official Documentation](https://package524.vercel.app)
+
 ## Table of contents
 
 - [Installation](#installation)

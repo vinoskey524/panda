@@ -1,16 +1,16 @@
 {
   "name": "@vinoskey524/panda",
-  "version": "1.0.9",
-  "module": "main.ts",
+  "version": "1.0.10",
   "type": "module",
   "description": "Advanced JSON-based state manager for React and React Native (Bare and Expo).",
+  "main": "./dist/main.js",
+  "types": "./dist/main.d.ts",
   "exports": {
     "import": {
       "types": "./dist/main.d.ts",
       "default": "./dist/main.js"
     }
   },
-  "types": "./dist/main.d.ts",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/vinoskey524/panda.git"
@@ -19,7 +19,7 @@
   "bugs": {
     "url": "https://github.com/vinoskey524/panda/issues"
   },
-  "homepage": "https://github.com/vinoskey524/panda#readme",
+  "homepage": "https://package524.vercel.app",
   "keywords": [
     "panda",
     "redux",

@@ -1,6 +1,6 @@
 {
   "name": "@vinoskey524/panda",
-  "version": "1.0.13",
+  "version": "1.0.14",
   "type": "module",
   "description": "Advanced JSON-based state manager for React and React Native (Bare and Expo).",
   "main": "./dist/main.js",

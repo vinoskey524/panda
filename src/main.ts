@@ -9,6 +9,7 @@
 */
 
 import { useState, useRef, useEffect } from 'react';
+import json from '@vinoskey524/oh-my-json';
 
 /* ---------------------------------------------- Types ---------------------------------------------- */
 
@@ -245,9 +246,10 @@ const isDevFunc = (): boolean => (typeof __DEV__ !== 'undefined') ? __DEV__ : pr
 
 /** Generate ID */
 const generateIdFunc = (): string => {
-    let id = '';
     const val = '0aW9zXe8CrVt1By5NuA46iZ3oEpRmTlYkUjIhOgPfMdQsSqDwFxGcHvJbKnL';
-    for (var i = 0; i < 14; i++) id += val.charAt(Math.floor(Math.random() * 36));
+    let id = '';
+    for (var i = 0; i < val.length; i++)
+        id += val.charAt(Math.floor(Math.random() * val.length));
     return id;
 };
 
@@ -592,8 +594,43 @@ const extractPandataFromPathFunc = (x: { path: '*' | string }): FUNCTION_DEFAULT
             /* Seek path */
             const keys = Object.keys(storeTopLevelDATA.current);
             const filter = keys.filter((e) => e.includes(path) && e.indexOf(path) === 0);
-            if (filter.length === 0)
-                throw new Error(`No data found at "${path}"!`); /* If no pandata found */
+            if (filter.length === 0) {
+                /* Process preserved path */
+                let prePath = '';
+                let preVal = '';
+                let rpath = '';
+                const klen = keys.length;
+                if (klen > 0)
+                    for (let i = 0; i < klen; i++) {
+                        const ckey = keys[i];
+                        if (path.includes(ckey) && path.indexOf(ckey) === 0) {
+                            const val = storeTopLevelDATA.current[ckey];
+                            if (typeof val !== 'string')
+                                break;
+                            const isPreserved = val.indexOf('$pre_') === 0;
+                            if (isPreserved) {
+                                prePath = ckey;
+                                preVal = val;
+                                rpath = path.replace(ckey + '.', '');
+                            }
+                            break;
+                        }
+                    }
+
+                /* return preserved pandata */
+                if (preVal.length > 0) {
+                    const preData = preserveDATA.current[preVal];
+                    const jget = json.get(preData, rpath);
+                    if (!jget)
+                        throw new Error(`No data found at "${rpath}" (${preVal})!`);
+                    res.data = jget;
+                    return res;
+                }
+
+                /* If no pandata found */
+                else
+                    throw new Error(`No data found at "${path}"!`);
+            }
 
             /* If pandata found */
             const tab = filter.sort((a, b) => a.localeCompare(b));
@@ -606,9 +643,11 @@ const extractPandataFromPathFunc = (x: { path: '*' | string }): FUNCTION_DEFAULT
             /* Set preserved data */
             for (let k in obj) {
                 const val = obj[k];
-                if (typeof val !== 'string') continue;
+                if (typeof val !== 'string')
+                    continue;
                 const isPreserved = val.indexOf('$pre_') === 0;
-                if (isPreserved) obj[k] = preserveDATA.current[val];
+                if (isPreserved)
+                    obj[k] = preserveDATA.current[val];
             }
 
             /* Build JSON Object from paths */
@@ -642,7 +681,8 @@ const extractPandataFromPathFunc = (x: { path: '*' | string }): FUNCTION_DEFAULT
         }
 
     } catch (e: any) {
-        res.ok = false; res.log = e.message;
+        res.ok = false;
+        res.log = e.message;
         logFunc(`Err :: extractPandataFromPathFunc() => ${e.message}`);
     }
     return res;
@@ -653,7 +693,8 @@ const formatPathFunc = (x: { path: string, removeLastBracket?: true }): string =
     let path = x.path.replaceAll('][', '_').replaceAll('].[', '_');
     if (x.removeLastBracket) {
         const pathSplit = path.split('');
-        if (pathSplit[pathSplit.length - 1] === ']') pathSplit.pop();
+        if (pathSplit[pathSplit.length - 1] === ']')
+            pathSplit.pop();
         path = pathSplit.join('');
     }
     return path;
@@ -855,7 +896,8 @@ const updateStoreDataFunc = (x: { pandata: JSON_DEFAULT_TYPE }): FUNCTION_DEFAUL
         /* Remove undefined pandata */
         for (let p in storeTopLevelDATA.current) {
             const current = storeTopLevelDATA.current[p];
-            if (current === undefined) delete storeTopLevelDATA.current[p];
+            if (current === undefined)
+                delete storeTopLevelDATA.current[p];
         }
 
         /* Post processing */
@@ -863,7 +905,8 @@ const updateStoreDataFunc = (x: { pandata: JSON_DEFAULT_TYPE }): FUNCTION_DEFAUL
             if (hasPropertyFunc(storeTopLevelDATA.current, k)) {
                 const oldVal = postProcess[k];
                 const currentVal = storeTopLevelDATA.current[k];
-                if (oldVal !== currentVal) updatedPandata[k] = k;
+                if (oldVal !== currentVal)
+                    updatedPandata[k] = k;
 
             } else deletedPandata[k] = k;
         }
@@ -890,6 +933,7 @@ const updateStoreDataFunc = (x: { pandata: JSON_DEFAULT_TYPE }): FUNCTION_DEFAUL
             else
                 deletedPandata[k] = k;
         }
+
 
         /* Trigger updates */
         delayFunc().then(() => {
@@ -1273,6 +1317,7 @@ const topLevelJsonFunc = (x: { data: JSON_DEFAULT_TYPE, arr?: string[] }): FUNCT
 const reverseTopLevelJsonFunc = (x: { data: JSON_DEFAULT_TYPE }): FUNCTION_DEFAULT_RETURN_TYPE => {
     let res: FUNCTION_DEFAULT_RETURN_TYPE = { ok: true, log: '', data: undefined };
     try {
+        logFunc('\n\n');
         /* 
         * Purge 
         * When a path with a value of type array or json is overwritted, then clear any other depending paths in order to apply the update safely
@@ -1312,11 +1357,15 @@ const reverseTopLevelJsonFunc = (x: { data: JSON_DEFAULT_TYPE }): FUNCTION_DEFAU
         for (let i = 0; i < tab.length; i++) {
             /* Extract keys */
             const target = tab[i];
-            const keysTab = allKeys.filter((e) => e.includes(target) && e.indexOf(target) === 0);
+            let keysTab = allKeys.filter((e) => e.includes(target) && e.indexOf(target) === 0);
+            const kjoin = keysTab.join('');
+            if (kjoin.includes('.'))
+                keysTab = keysTab.filter((e) => e.includes(target + '.') && e.indexOf(target + '.') === 0);
             topLevelKeys[target] = keysTab;
 
             /* Set 'top-level' keys inside the collector */
-            const path = keysTab[0].split('.')[1] ?? undefined;
+            const firstEntry = keysTab[0] || undefined;
+            const path = !firstEntry ? undefined : firstEntry.split('.')[1] ?? undefined;
             if (path) { /* Process top-level keys that are objects */
                 const topLevelKeyType = getPathTypeFunc(path);
                 collector[target] = (topLevelKeyType === 'json') ? {} : [];
@@ -1469,6 +1518,7 @@ const getDataFunc = (path: '*' | GET_ARG_PATH_TYPE, UIupdater?: GET_ARG_UI_UPDAT
         const dataType = getRealTypeFunc(path).type;
         const hasUpdater = typeof UIupdater === 'function' && watcherId;
         const cachedPandata: JSON_DEFAULT_TYPE = {}; /* Fetched pandata cache */
+
 
         /* - */
         switch (dataType) {
@@ -1668,7 +1718,8 @@ export const usePanda = (path: string | string[] | JSON_STRING_TYPE): any => {
         isMounted.current = true;
 
         /* Prevent double rendering side effects, caused by "Strict Mode" */
-        if (isDev && !again.current) {
+        const mountAgain = isDev && !again.current;
+        if (mountAgain) {
             again.current = true;
             delayFunc().then(() => {
                 remountingTimer.current = setTimeout(() => {

@@ -1,6 +1,7 @@
 .yarn
 node_modules
 src
+archive
 dist/main.mjs
 .DS_Store
 

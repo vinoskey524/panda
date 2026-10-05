@@ -457,15 +457,9 @@ inspection :: {
 
 ## Author
 
-My name is **Hamet Kévin E. ODOUTAN** (@vinoskey524) and I’ve been doing software development (web, desktop and mobile) since 2017.
+My name is **Hamet Kévin E. ODOUTAN** (@vinoskey524), and I'm a self-taught full-stack software engineer with **9 years of experience (since 2017)** designing, building, and shipping web and mobile applications with **TypeScript**, **React**, and **PostgreSQL**, including custom PL/pgSQL functions.
 
-I’m not the kind of developer who makes a dumb copy-paste from ChatGPT. No! I like to understand things and know what I’m really doing. 
-For me, a real developer should be able to explain every single line of his code.
-
-Don’t ask me which school or university I attended, because I taught myself software engineering using PDFs from **openclassrooms.com**, which was called **siteduzero** when I started.
-A sad truth is that you can’t learn coding just by watching videos; you need books!
-
-I’m really passionate about building software, and **I sincerely believe that being a developer is not just a job, but a lifestyle**!
+I take features end to end, from database schema and APIs to polished, high-performance interfaces, and I work across web and mobile with React and React Native (Bare and Expo). I use AI tools throughout my workflow to move quickly, prioritize what matters most, and iterate fast. I'm always ready to learn and adopt new technologies quickly.
 
 ## Other packages
 

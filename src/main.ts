@@ -8,15 +8,19 @@
 *
 */
 
-import { useState, useRef, useEffect } from 'react';
+import { useRef, useMemo, useCallback, useSyncExternalStore } from 'react';
 import json from '@vinoskey524/oh-my-json';
 
 /* ---------------------------------------------- Types ---------------------------------------------- */
 
-declare const __DEV__: boolean;
-
 type MAIN_TYPE = {
-    init: () => PANDA_TYPE
+    init: (state: PANDA_STORE_STATE) => PANDA_TYPE
+};
+
+type INIT_TYPE = {
+    type: 'client' | 'server',
+    family: string,
+    address: string
 };
 
 type PANDA_TYPE = {
@@ -59,7 +63,6 @@ type PANDA_TYPE = {
 type STORE_ARG_TYPE = [pandata: JSON_DEFAULT_TYPE, deps?: string | string[]];
 
 type GET_ARG_PATH_TYPE = string | string[] | JSON_STRING_TYPE;
-type GET_ARG_UI_UPDATER_TYPE = Function;
 
 type WATCH_ARG_TYPE = string | JSON_STRING_TYPE;
 type WATCH_RETURN_TYPE = {
@@ -106,11 +109,280 @@ type VALID_TYPES_TYPE = 'bigint' | 'number' | 'string' | 'boolean' | 'function' 
 type JSON_DEFAULT_TYPE = { [key: string]: any };
 type JSON_STRING_TYPE = { [key: string]: string };
 
-type FUNCTION_DEFAULT_RETURN_TYPE = {
-    ok: boolean,
-    log: string,
-    data: any
+type FUNCTION_DEFAULT_RETURN_TYPE = { ok: boolean, log: string, data: any };
+
+/*
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-
+*/
+
+/* ---------------------------------------------- Typed API ---------------------------------------------- */
+
+/*
+* Everything in this section is TYPE-ONLY: it is erased at compile time and adds zero runtime code.
+* It powers "createPanda<Schema>()", which gives you a fully path-checked version of the Panda API.
+*/
+
+declare const refBrand: unique symbol;
+declare const preservedBrand: unique symbol;
+
+/**
+* Mark a schema field as "stored by reference" (see "preserve").
+* Panda never looks inside a preserved value, so no sub-paths are generated for it.
+* @example type Schema = { cart: Ref<{ items: string[] }> }
+*/
+type Ref<V> = { readonly [refBrand]: V };
+
+/** Token returned by "preserve()". Only meaningful for the type-checker. */
+type Preserved<V> = string & { readonly [preservedBrand]: V };
+
+/** Recursion budget for path generation (TypeScript gives up around 50 nested instantiations) */
+type Prev = [never, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+
+type IsAny<T> = 0 extends 1 & T ? true : false;
+
+/** Values panda never walks into */
+type Leaf = string | number | boolean | bigint | symbol | null | undefined | Function | Ref<any>;
+
+/** Any path that uses the "..." shortcut syntax */
+type Shortcut = `${string}...${string}`;
+
+/* ---------- Paths ---------- */
+
+/** Append a segment to a path, following panda's syntax: "a.b", "a.[0]", "a.[0][1]", "a.[0].b" */
+type Seg<P extends string, S extends string> =
+    P extends '' ? S :
+    S extends `[${string}` ? (P extends `${string}]` ? `${P}${S}` : `${P}.${S}`) :
+    `${P}.${S}`;
+
+/** One { path, value } pair per reachable path of the schema */
+type Ent<V, C extends string, D extends number> = { p: C, v: V } | WalkEntries<V, C, Prev[D]>;
+type WalkEntries<T, P extends string, D extends number> =
+    [D] extends [never] ? never :
+    T extends Leaf ? never :
+    T extends readonly (infer U)[] ? Ent<U, Seg<P, `[${number}]`>, D> :
+    T extends object ? { [K in keyof T & string]-?: Ent<T[K], Seg<P, K>, D> }[keyof T & string] :
+    never;
+type Entries<T> = WalkEntries<T, '', 12>;
+
+/** Every valid path of a schema. Falls back to "string" when no schema is given. */
+type PandaPaths<T> = IsAny<T> extends true ? string : Entries<T>['p'];
+
+/** Raw (still "Ref"-wrapped) type found at a concrete path */
+type RawAt<T, P extends string> =
+    IsAny<T> extends true ? any :
+    Entries<T> extends infer E ?
+    E extends { p: infer EP, v: infer EV } ? (P extends EP ? EV : never) : never :
+    never;
+
+/* ---------- Shortcuts ("...") ---------- */
+
+type IsUnion<T, U = T> = [T] extends [never] ? false : T extends any ? ([U] extends [T] ? false : true) : never;
+type Unique<T> = [T] extends [never] ? never : [IsUnion<T>] extends [false] ? T : never;
+
+/** "A...B" => the single schema path that starts with A and then reaches B (never if none, or if ambiguous) */
+type ResolveOnce<A extends string, B extends string, AP extends string> =
+    Unique<Extract<AP, `${A}.${B}` | `${A}.${string}.${B}`>>;
+
+/** Supports chained shortcuts: "a...b...c" */
+type ResolveShortcut<S extends string, AP extends string> =
+    S extends `${infer A}...${infer R}` ?
+    (R extends `${infer B}...${infer More}` ?
+        ResolveShortcut<`${ResolveOnce<A, B, AP>}...${More}`, AP> :
+        ResolveOnce<A, R, AP>) :
+    S;
+
+type ResolvedPath<T, P extends string> = P extends Shortcut ? ResolveShortcut<P, PandaPaths<T>> : P;
+
+/* ---------- Reading ---------- */
+
+/** Unwrap "Ref<V>" => V (what you get back when you read) */
+type Unref<V> =
+    V extends Ref<infer R> ? R :
+    V extends Function ? V :
+    V extends readonly (infer U)[] ? Unref<U>[] :
+    V extends object ? { [K in keyof V]: Unref<V[K]> } :
+    V;
+
+type DeepPartial<V> =
+    V extends Function ? V :
+    V extends readonly (infer U)[] ? DeepPartial<U>[] :
+    V extends object ? { [K in keyof V]?: DeepPartial<V[K]> } :
+    V;
+
+/** What get('*') returns. The store is filled progressively, so everything is optional. */
+type PandaState<T> = DeepPartial<Unref<T>>;
+
+type PathArg<T> = PandaPaths<T> | Shortcut;
+type GetArg<T> = '*' | PathArg<T> | readonly PathArg<T>[] | { readonly [key: string]: PathArg<T> };
+type WatchArg<T> = PathArg<T> | { readonly [key: string]: PathArg<T> };
+
+type GetValue<T, P extends string> =
+    IsAny<T> extends true ? any :
+    P extends '*' ? PandaState<T> :
+    Unref<RawAt<T, ResolvedPath<T, P>>>;
+
+type GetResult<T, A> =
+    A extends string ? GetValue<T, A> :
+    A extends readonly unknown[] ? { -readonly [I in keyof A]: GetValue<T, A[I] & string> } :
+    { -readonly [K in keyof A]: GetValue<T, A[K] & string> };
+
+type ShortcutError<P extends string> = {
+    readonly __pandaError: `The shortcut "${P}" matches no path, or several paths. Be more specific.`
 };
+
+type CheckPath<T, P> =
+    IsAny<T> extends true ? unknown :
+    P extends Shortcut ? ([ResolveShortcut<P, PandaPaths<T>>] extends [never] ? ShortcutError<P> : unknown) :
+    unknown;
+
+/** Validates every shortcut found in a get / usePanda / watch argument */
+type CheckArg<T, A> =
+    A extends string ? CheckPath<T, A> :
+    A extends readonly unknown[] ? { [I in keyof A]: CheckPath<T, A[I]> } :
+    { [K in keyof A]: CheckPath<T, A[K]> };
+
+/* ---------- Writing ---------- */
+
+/**
+* What can be written at a place of the schema.
+* - "Ref" fields and functions must go through "preserve()" (a bare function is an updater, not a value).
+* - Leaves also accept a synchronous updater: (current) => next
+* - Any field can be deleted with "undefined" (see "WriteTree").
+*/
+type WriteValue<V, Updatable extends boolean = true> =
+    [V] extends [Ref<infer R>] ? Preserved<R> :
+    [V] extends [Function] ? Preserved<V> :
+    [V] extends [readonly (infer U)[]] ? readonly WriteValue<U, false>[] :
+    [V] extends [object] ? WriteTree<V> :
+    Updatable extends true ? V | ((current: V) => V) : V;
+
+/** Regular (nested) writing: every field is optional, "undefined" deletes */
+type WriteTree<T> = { [K in keyof T]?: WriteValue<T[K]> | undefined };
+
+/** Path-based writing: { 'user.address.city': 'Paris' } */
+type PathWrites<T> = { [E in Entries<T> as E['p']]?: WriteValue<E['v']> | undefined };
+
+/** Argument of store(): nested, path-based, or both mixed. Shortcut keys are accepted but not value-checked. */
+type PandaStoreInput<T> =
+    IsAny<T> extends true ? JSON_DEFAULT_TYPE :
+    WriteTree<T> & PathWrites<T> & { [key: Shortcut]: any };
+
+/** Value accepted by an interpolated "%N" key for the path at dependency index N. */
+type StorePathValue<T, P extends string> =
+    IsAny<T> extends true ? any :
+    IsAny<RawAt<T, ResolvedPath<T, P>>> extends true ? any :
+    WriteValue<RawAt<T, ResolvedPath<T, P>>>;
+
+/** Give exact interpolation keys ("%0", "%1", ...) the value type of their matching dependency. */
+type TupleInterpolationInput<T, D extends readonly unknown[]> = {
+    [K in keyof D as K extends `${infer I extends number}` ? `%${I}` : never]?:
+    StorePathValue<T, D[K] & string>
+};
+
+type InterpolatedStoreInput<T, D> = (
+    D extends readonly unknown[]
+    ? TupleInterpolationInput<T, D>
+    : { '%0'?: StorePathValue<T, D & string> }
+) & JSON_DEFAULT_TYPE;
+
+/** Valid paths for store() interpolation dependencies, preserving tuple indexes for "%N" type checking. */
+type StoreDeps<T> = PathArg<T> | readonly PathArg<T>[];
+
+interface StoreFn<T> {
+    /** Fully checked version without interpolation. */
+    (pandata: PandaStoreInput<T>): FUNCTION_DEFAULT_RETURN_TYPE;
+
+    /**
+    * Interpolated keys: dependency paths are schema-checked and exact "%N" updater
+    * values use the corresponding dependency's value type.
+    */
+    <const D extends StoreDeps<T>>(
+        pandata: InterpolatedStoreInput<T, D>,
+        deps: D & CheckArg<T, D>
+    ): FUNCTION_DEFAULT_RETURN_TYPE;
+}
+
+/* ---------- Watching ---------- */
+
+type WatchKind = 'set' | 'update' | 'delete';
+
+/** Arguments received by a watcher callback. "delete" callbacks always receive "undefined" (see runWatcherFunctionFunc). */
+type WatchCallbackArgs<T, A, K extends WatchKind> =
+    IsAny<T> extends true ? [key: string | null, data: any] :
+    A extends string ? [key: null, data: K extends 'delete' ? undefined : GetValue<T, A>] :
+    { [Key in keyof A & string]: [key: Key, data: K extends 'delete' ? undefined : GetValue<T, A[Key] & string>] }[keyof A & string];
+
+/**
+* Callbacks must return nothing ("void | undefined" instead of "void"):
+* panda silently ignores async callbacks, so returning a Promise becomes a compile error.
+* Unknown keys (anything but set / update / delete) are rejected for the same reason.
+*/
+type WatchCallbacks<T, A> = {
+    set?: (...args: WatchCallbackArgs<T, A, 'set'>) => void | undefined,
+    update?: (...args: WatchCallbackArgs<T, A, 'update'>) => void | undefined,
+    delete?: (...args: WatchCallbackArgs<T, A, 'delete'>) => void | undefined
+};
+
+interface WatchHandle<T, A> {
+    on: (callbacks: WatchCallbacks<T, A>, watcherId: [string]) => FUNCTION_DEFAULT_RETURN_TYPE;
+}
+
+/* ---------- The typed API ---------- */
+
+interface PandaTyped<T> {
+    /** Store pandata */
+    store: StoreFn<T>;
+
+    /** Get pandata: '*' | path | [paths] | { key: path } */
+    get: <const A extends GetArg<T>>(path: A & CheckArg<T, A>) => GetResult<T, A>;
+
+    /** Same as "get", but re-renders the component every time the data changes */
+    usePanda: <const A extends GetArg<T>>(path: A & CheckArg<T, A>) => GetResult<T, A>;
+
+    /** Watch pandata */
+    watch: <const A extends WatchArg<T>>(path: A & CheckArg<T, A>) => WatchHandle<T, A>;
+
+    /** Unwatch pandata */
+    unwatch: (watcherId: string | string[]) => void;
+
+    /** Preserve pandata's references */
+    preserve: <V extends object | Function>(pandata: V) => Preserved<V>;
+
+    /** Generate an ID */
+    genID: () => string;
+
+    /** Inspect shortcuts */
+    inspectShortcuts: () => { [shortcut: string]: PandaPaths<T> | undefined };
+}
 
 /*
 -
@@ -148,6 +420,7 @@ type FUNCTION_DEFAULT_RETURN_TYPE = {
 /* ---------------------------------------------- Constants ---------------------------------------------- */
 
 const _dev_ = false;
+
 const _default_valid_types_: VALID_TYPES_TYPE[] = ['bigint', 'string', 'number', 'boolean', 'function', 'symbol', 'array', 'json', 'null', 'undefined'];
 
 /*
@@ -185,20 +458,70 @@ const _default_valid_types_: VALID_TYPES_TYPE[] = ['bigint', 'string', 'number',
 
 /* ---------------------------------------------- DATA Logistic ---------------------------------------------- */
 
-/** Store DATA */
-const storeDATA: { current: JSON_DEFAULT_TYPE } = { current: {} };
+type PANDA_STORE_STATE = {
+    storeDATA: { current: JSON_DEFAULT_TYPE };
+    storeTopLevelDATA: { current: JSON_DEFAULT_TYPE };
+    watcherDATA: { current: WATCHER_DATA_TYPE };
+    preserveDATA: { current: PRESERVE_DATA_TYPE };
+    shortcutsDATA: { current: JSON_DEFAULT_TYPE };
+    storeVersion: { current: number };
+    storeListeners: { current: Set<() => void> };
+};
 
-/** Top-level version of "storeDATA" */
-const storeTopLevelDATA: { current: JSON_DEFAULT_TYPE } = { current: {} };
+const createPandaStoreState = (): PANDA_STORE_STATE => ({
+    storeDATA: { current: {} },
+    storeTopLevelDATA: { current: {} },
+    watcherDATA: { current: {} },
+    preserveDATA: { current: {} },
+    shortcutsDATA: { current: {} },
+    storeVersion: { current: 0 },
+    storeListeners: { current: new Set() }
+});
 
-/** - */
-const watcherDATA: { current: WATCHER_DATA_TYPE } = { current: {} };
+/** Browser instances retain the historical shared store; server instances are isolated per createPanda() call. */
+const sharedPandaStoreState = createPandaStoreState();
+let activePandaStoreState = sharedPandaStoreState;
 
-/** - */
-const preserveDATA: { current: PRESERVE_DATA_TYPE } = { current: {} };
+/** Run synchronous store operations against the owning Panda instance. */
+const withPandaStoreState = <T>(state: PANDA_STORE_STATE, operation: () => T): T => {
+    const previousState = activePandaStoreState;
+    activePandaStoreState = state;
+    try {
+        return operation();
+    } finally {
+        activePandaStoreState = previousState;
+    }
+};
 
-/* - */
-const shortcutsDATA: { current: JSON_DEFAULT_TYPE } = { current: {} };
+/** State references resolve against the currently executing Panda instance. */
+const storeDATA = {
+    get current() { return activePandaStoreState.storeDATA.current; },
+    set current(value: JSON_DEFAULT_TYPE) { activePandaStoreState.storeDATA.current = value; }
+};
+const storeTopLevelDATA = {
+    get current() { return activePandaStoreState.storeTopLevelDATA.current; },
+    set current(value: JSON_DEFAULT_TYPE) { activePandaStoreState.storeTopLevelDATA.current = value; }
+};
+const watcherDATA = {
+    get current() { return activePandaStoreState.watcherDATA.current; },
+    set current(value: WATCHER_DATA_TYPE) { activePandaStoreState.watcherDATA.current = value; }
+};
+const preserveDATA = {
+    get current() { return activePandaStoreState.preserveDATA.current; },
+    set current(value: PRESERVE_DATA_TYPE) { activePandaStoreState.preserveDATA.current = value; }
+};
+const shortcutsDATA = {
+    get current() { return activePandaStoreState.shortcutsDATA.current; },
+    set current(value: JSON_DEFAULT_TYPE) { activePandaStoreState.shortcutsDATA.current = value; }
+};
+const storeVersion = {
+    get current() { return activePandaStoreState.storeVersion.current; },
+    set current(value: number) { activePandaStoreState.storeVersion.current = value; }
+};
+const storeListeners = {
+    get current() { return activePandaStoreState.storeListeners.current; },
+    set current(value: Set<() => void>) { activePandaStoreState.storeListeners.current = value; }
+};
 
 /*
 -
@@ -241,9 +564,6 @@ const logFunc = (...log: any[]): void => { if (_dev_) console.log(...log) };
 /** Permanent log */
 const plogFunc = (...log: any[]): void => { console.log(...log) };
 
-/** Check if the app is in development mode */
-const isDevFunc = (): boolean => (typeof __DEV__ !== 'undefined') ? __DEV__ : process.env.NODE_ENV === 'development';
-
 /** Generate ID */
 const generateIdFunc = (): string => {
     const val = '0aW9zXe8CrVt1By5NuA46iZ3oEpRmTlYkUjIhOgPfMdQsSqDwFxGcHvJbKnL';
@@ -254,7 +574,7 @@ const generateIdFunc = (): string => {
 };
 
 /** Delay function execution */
-const delayFunc = (x?: { ms?: number }): Promise<void> => { return new Promise(resolve => setTimeout(resolve, x?.ms ?? 1)) };
+const delayFunc = (x?: number): Promise<void> => { return new Promise(resolve => setTimeout(resolve, x ?? 1)) };
 
 /** Check if a property exists */
 const hasPropertyFunc = (x: JSON_DEFAULT_TYPE, y: string): boolean => {
@@ -391,7 +711,8 @@ const cloneObjectFunc = (object: JSON_DEFAULT_TYPE | any[]): FUNCTION_DEFAULT_RE
     /* Set preserved data */
     for (let k in obj) {
         const val = obj[k];
-        if (typeof val !== 'string') continue;
+        if (typeof val !== 'string')
+            continue;
         const isPreserved = val.indexOf('$pre_') === 0;
         if (isPreserved) obj[k] = preserveDATA.current[val];
     }
@@ -817,6 +1138,9 @@ const updateStoreDataFunc = (x: { pandata: JSON_DEFAULT_TYPE }): FUNCTION_DEFAUL
         const watchedPaf: JSON_DEFAULT_TYPE = {};
         const postProcess: JSON_DEFAULT_TYPE = {};
 
+        /* True as soon as at least one path really changes */
+        let mutated = false;
+
         /* Process each path */
         const pandataPaths = Object.keys(pandata).sort((a, b) => a.localeCompare(b));
         for (let p = 0; p < pandataPaths.length; p++) {
@@ -846,6 +1170,7 @@ const updateStoreDataFunc = (x: { pandata: JSON_DEFAULT_TYPE }): FUNCTION_DEFAUL
                 sourceB: storeTopLevelDATA.current
             }) === 'unchanged';
             if (unchanged) continue;
+            mutated = true;
 
             /* Process current path and collect all path affected by current path's modifications */
             const formatedPath = formatPathFunc({ path: path, removeLastBracket: true });
@@ -900,6 +1225,9 @@ const updateStoreDataFunc = (x: { pandata: JSON_DEFAULT_TYPE }): FUNCTION_DEFAUL
                 delete storeTopLevelDATA.current[p];
         }
 
+        /* Tell the hooks that the store has changed */
+        if (mutated) storeVersion.current++;
+
         /* Post processing */
         for (let k in postProcess) {
             if (hasPropertyFunc(storeTopLevelDATA.current, k)) {
@@ -934,9 +1262,9 @@ const updateStoreDataFunc = (x: { pandata: JSON_DEFAULT_TYPE }): FUNCTION_DEFAUL
                 deletedPandata[k] = k;
         }
 
-
-        /* Trigger updates */
-        delayFunc().then(() => {
+        /* Trigger updates within the same instance context; this work is deferred beyond the store() call. */
+        const state = activePandaStoreState;
+        delayFunc().then(() => withPandaStoreState(state, () => {
             /* Updated paths */
             const updatedPaths = Object.keys(updatedPandata);
             triggerUpdateFunc({ path: updatedPaths, type: 'update' });
@@ -948,7 +1276,11 @@ const updateStoreDataFunc = (x: { pandata: JSON_DEFAULT_TYPE }): FUNCTION_DEFAUL
             /* Deleted paths */
             const deletedPaths = Object.keys(deletedPandata);
             triggerUpdateFunc({ path: deletedPaths, type: 'delete' });
-        });
+
+            /* Global listeners */
+            if (mutated)
+                storeListeners.current.forEach((listener) => { try { listener() } catch (e: any) { } });
+        }));
 
     } catch (e: any) { res.ok = false; res.log = e.message }
     return res;
@@ -990,6 +1322,13 @@ const removeWatcherFunc = (x: { watcherId: string | string[] }) => {
             delete wdata.watch.set[id];
             delete wdata.watch.update[id];
             delete wdata.watch.delete[id];
+
+            /* Forget the path once nobody watches it anymore, otherwise "watcherDATA" only grows (and slows every update down) */
+            const empty = Object.keys(wdata.get).length === 0 &&
+                Object.keys(wdata.watch.set).length === 0 &&
+                Object.keys(wdata.watch.update).length === 0 &&
+                Object.keys(wdata.watch.delete).length === 0;
+            if (empty) delete watcherDATA.current[k];
         }
     }
 };
@@ -1009,6 +1348,7 @@ const triggerUpdateFunc = (x: TRIGGER_UPDATE_ARG_TYPE): void => {
     try {
         const path = Array.isArray(x.path) ? x.path : [x.path];
         const typ = x.type;
+        const state = activePandaStoreState;
 
         for (let i = 0; i < path.length; i++) {
             const targ = formatPathFunc({ path: path[i], removeLastBracket: true }); /* Current path */
@@ -1019,21 +1359,21 @@ const triggerUpdateFunc = (x: TRIGGER_UPDATE_ARG_TYPE): void => {
             const getwatchers = watcherDATA.current[targ].get;
             const getFuncs = Object.values(getwatchers);
             for (let k = 0; k < getFuncs.length; k++)
-                delayFunc().then(() => {
+                delayFunc().then(() => withPandaStoreState(state, () => {
                     try { getFuncs[k].callback() } catch (e: any) { }
-                });
+                }));
 
             /* - */
             const watchWatchers = watcherDATA.current[targ].watch[typ];
             const watchFuncs = Object.values(watchWatchers);
             for (let k = 0; k < watchFuncs.length; k++)
-                delayFunc().then(() => {
+                delayFunc().then(() => withPandaStoreState(state, () => {
                     runWatcherFunctionFunc({
                         path: targ,
                         key: watchFuncs[k].key,
                         callback: watchFuncs[k].callback
                     })
-                });
+                }));
         }
 
     } catch (e: any) { logFunc('Err :: triggerUpdateFunc() =>', e.message) };
@@ -1511,14 +1851,12 @@ const storeDataFunc = (...x: STORE_ARG_TYPE): FUNCTION_DEFAULT_RETURN_TYPE => {
     return res;
 };
 
-/** Get pandata */
-const getDataFunc = (path: '*' | GET_ARG_PATH_TYPE, UIupdater?: GET_ARG_UI_UPDATER_TYPE, watcherId?: string): any => {
+/** Get pandata, along with the (resolved) paths it has been read from */
+const getDataAndPathsFunc = (path: '*' | GET_ARG_PATH_TYPE): { data: any, paths: string[] } => {
     const res: FUNCTION_DEFAULT_RETURN_TYPE = { ok: true, log: '', data: undefined };
+    const cachedPandata: JSON_DEFAULT_TYPE = {}; /* Fetched pandata cache */
     try {
         const dataType = getRealTypeFunc(path).type;
-        const hasUpdater = typeof UIupdater === 'function' && watcherId;
-        const cachedPandata: JSON_DEFAULT_TYPE = {}; /* Fetched pandata cache */
-
 
         /* - */
         switch (dataType) {
@@ -1574,17 +1912,15 @@ const getDataFunc = (path: '*' | GET_ARG_PATH_TYPE, UIupdater?: GET_ARG_UI_UPDAT
             default: { throw new Error(`Invalid path!`) };
         };
 
-        /* Setup a "watcher" for each path • Each key of "cachedPandata" represent a path */
-        if (hasUpdater)
-            for (let path in cachedPandata)
-                createWatcherFunc({ source: 'get', path, watcherId, callback: UIupdater });
-
     } catch (e: any) {
         res.ok = false; res.log = e.message;
         logFunc('Err :: getDataFunc() =>', e.message);
     }
-    return res.data;
+    return { data: res.data, paths: Object.keys(cachedPandata) }; /* Each key of "cachedPandata" is a path */
 };
+
+/** Get pandata */
+const getDataFunc = (path: '*' | GET_ARG_PATH_TYPE): any => getDataAndPathsFunc(path).data;
 
 /** Watch pandata */
 const watchDataFunc = (x: { path: WATCH_ARG_TYPE, watcherId: string, callbacks: WATCH_ON_ARG_TYPE }): FUNCTION_DEFAULT_RETURN_TYPE => {
@@ -1690,70 +2026,73 @@ const preserveDATAFunc = (pandata: any): any => {
 /* ---------------------------------------------- Hooks ---------------------------------------------- */
 
 /** "usePanda" Hook */
-export const usePanda = (path: string | string[] | JSON_STRING_TYPE): any => {
-    /* - */
-    const isMounted = useRef(false);
-    const isDev = isDevFunc();
-    const remountingTimer = useRef<any>(null);
-    const cleanUpReady = useRef(false);
-    const again = useRef(false);
-    const [mountAgain, setMountAgain] = useState(again.current);
+const usePanda = (path: string | string[] | JSON_STRING_TYPE, state: PANDA_STORE_STATE): any => {
+    /* Unique and immutable ID of this hook's watchers (generated once) */
+    const idRef = useRef<string | null>(null);
+    if (idRef.current === null) idRef.current = generateIdFunc();
+    const watcherId = idRef.current;
 
-    /* UI Updater */
-    const refresher = useRef(false);
-    const [_, setRefresh] = useState(refresher.current);
-    const refreshFunc = (): void => { refresher.current = !refresher.current; setRefresh(refresher.current) };
+    /* "path" is often a new array/object on every render, so it's compared by value */
+    const pathKey = typeof path === 'string' ? path : JSON.stringify(path);
 
-    /* Get pandata & watch every update */
-    const watcherId = useRef(generateIdFunc()).current;
-    const pandata = getDataFunc(path, refreshFunc, watcherId);
+    /* 
+    * Read pandata (and the real paths behind it) only when the path or the store changed. 
+    * Thanks to this, the returned value keeps the same reference as long as nothing changed.
+    */
+    const version = state.storeVersion.current;
+    const { data, paths } = useMemo(
+        () => withPandaStoreState(state, () => getDataAndPathsFunc(path)),
+        [pathKey, version, state]
+    ); // eslint-disable-line react-hooks/exhaustive-deps
 
-    /* On mount */
-    const onMountFunc = (): any => {
-        /* - */
-        if (isMounted.current) {
-            cleanUpReady.current = true;
-            return () => onUnmountFunc(); /* Clean up */
-        }
-        isMounted.current = true;
+    /* Watch the paths, only while the component is mounted, and only the paths currently in use */
+    const pathsKey = JSON.stringify(paths);
+    const subscribe = useCallback((onChange: () => void): (() => void) =>
+        withPandaStoreState(state, () => {
+            const list: string[] = JSON.parse(pathsKey);
+            let watchAll = false;
 
-        /* Prevent double rendering side effects, caused by "Strict Mode" */
-        const mountAgain = isDev && !again.current;
-        if (mountAgain) {
-            again.current = true;
-            delayFunc().then(() => {
-                remountingTimer.current = setTimeout(() => {
-                    if (cleanUpReady.current)
-                        return;
-                    setMountAgain(again.current);
-                }, 50);
+            /* - */
+            for (let i = 0; i < list.length; i++) {
+                /* "*" has no specific path to watch: listen to every change of the store */
+                if (list[i] === '*') {
+                    watchAll = true;
+                    continue;
+                }
+
+                /* - */
+                createWatcherFunc({
+                    source: 'get',
+                    path: formatPathFunc({ path: list[i], removeLastBracket: true }), /* Same format as the one used by "triggerUpdateFunc" */
+                    watcherId,
+                    callback: onChange
+                });
+            }
+            if (watchAll)
+                storeListeners.current.add(onChange);
+
+            /* Clean up: when the component unmounts, or when the paths change */
+            return () => withPandaStoreState(state, () => {
+                removeWatcherFunc({ watcherId });
+                storeListeners.current.delete(onChange);
             });
-        }
+        }), [pathsKey, watcherId, state]);
 
-        /* Clean up */
-        return isDev ? undefined : () => onUnmountFunc();
-    };
-
-    /* On unmount */
-    const onUnmountFunc = (): void => {
-        /* Clear timer */
-        clearTimeout(remountingTimer.current);
-
-        /* - */
-        unwatch(watcherId);
-    };
-
-    /* - */
-    useEffect(onMountFunc, [mountAgain]);
+    /* 
+    * Re-render on every change, and re-check the store right after subscribing, 
+    * so that no update is lost between the render and the subscription.
+    */
+    const getSnapshot = useCallback(() => state.storeVersion.current, [state]);
+    useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 
     /* Return pandata */
-    return pandata;
+    return data;
 };
 
 /*
 -
 -
-
+-
 -
 -
 -
@@ -1786,18 +2125,19 @@ export const usePanda = (path: string | string[] | JSON_STRING_TYPE): any => {
 
 /* ---------------------------------------------- Panda ---------------------------------------------- */
 
-const panda: MAIN_TYPE = {
-    init(): PANDA_TYPE {
+/* Panda */
+const Panda: MAIN_TYPE = {
+    init(state: PANDA_STORE_STATE): PANDA_TYPE {
         const next = {
             /* Store pandata */
             store(...x: STORE_ARG_TYPE): FUNCTION_DEFAULT_RETURN_TYPE {
-                const store = storeDataFunc(...x);
+                const store = withPandaStoreState(state, () => storeDataFunc(...x));
                 return store;
             },
 
             /* Get pandata */
             get(path: '*' | GET_ARG_PATH_TYPE): any {
-                const get = getDataFunc(path);
+                const get = withPandaStoreState(state, () => getDataFunc(path));
                 return get;
             },
 
@@ -1805,7 +2145,7 @@ const panda: MAIN_TYPE = {
             watch(path: WATCH_ARG_TYPE): WATCH_RETURN_TYPE {
                 const wnext = {
                     on(callbacks: WATCH_ON_ARG_TYPE, watcherId: [string]): FUNCTION_DEFAULT_RETURN_TYPE {
-                        const watch = watchDataFunc({ path, callbacks, watcherId: watcherId[0] });
+                        const watch = withPandaStoreState(state, () => watchDataFunc({ path, callbacks, watcherId: watcherId[0] }));
                         return watch;
                     }
                 };
@@ -1814,12 +2154,12 @@ const panda: MAIN_TYPE = {
 
             /* Unwatch pandata */
             unwatch(watcherId: string | string[]): void {
-                removeWatcherFunc({ watcherId });
+                withPandaStoreState(state, () => removeWatcherFunc({ watcherId }));
             },
 
             /* Preserve pandata's references */
             preserve(pandata: any): any {
-                const preserve = preserveDATAFunc(pandata);
+                const preserve = withPandaStoreState(state, () => preserveDATAFunc(pandata));
                 return preserve;
             },
 
@@ -1830,29 +2170,44 @@ const panda: MAIN_TYPE = {
 
             /* Inspect shortcuts */
             inspectShortcuts(): JSON_DEFAULT_TYPE {
-                inspectShortcutsFunc();
-                return shortcutsDATA.current;
-            },
+                return withPandaStoreState(state, () => {
+                    inspectShortcutsFunc();
+                    return shortcutsDATA.current;
+                });
+            }
         };
         return next;
     }
 };
 
-/** Export Panda */
-const Panda = panda.init();
-export default Panda;
-/** Store pandata */
-export const store = Panda.store;
-/** Get pandata */
-export const get = Panda.get;
-/** Watch pandata */
-export const watch = Panda.watch;
-/** Unwatch pandata */
-export const unwatch = Panda.unwatch;
-/** Preserve pandata's references */
-export const preserve = Panda.preserve;
-/** Generate ID */
-export const genID = Panda.genID;
-/** Inspect shortcuts */
-export const inspectShortcuts = Panda.inspectShortcuts;
+/**
+* Create a fully type-safe Panda, based on the shape of your data.
+*
+* Every path you give to store, get, usePanda and watch is checked at compile time:
+* a typo becomes a compile error, and get() / usePanda() / watch() know the type of what they return.
+*
+* Browser instances share the store for backwards compatibility. For SSR, call createPanda() once per request
+* and pass that instance into the render tree; do not reuse a module-level instance for request-specific data.
+* Without a type argument, it behaves like the untyped API.
+*
+* @example
+* type Schema = { user: { name: string, stack: string[] } };
+* export const { store, get, usePanda, watch, unwatch, preserve, genID, inspectShortcuts } = createPanda<Schema>();
+*/
+export const createPanda = <T extends JSON_DEFAULT_TYPE = any>(): PandaTyped<T> => {
+    const state = ('window' in globalThis) ? sharedPandaStoreState : createPandaStoreState();
+    const panda = Panda.init(state);
+    const typed = {
+        store: panda.store,
+        get: panda.get,
+        usePanda: (path: string | string[] | JSON_STRING_TYPE) => usePanda(path, state),
+        watch: panda.watch,
+        unwatch: panda.unwatch,
+        preserve: panda.preserve,
+        genID: panda.genID,
+        inspectShortcuts: panda.inspectShortcuts
+    };
+    return typed as unknown as PandaTyped<T>;
+};
+export default createPanda;
 

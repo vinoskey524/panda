@@ -1,24 +1,31 @@
 {
   "name": "@vinoskey524/panda",
   "version": "1.1.1",
-  "type": "module",
-  "description": "Advanced JSON-based state manager for React and React Native (Bare and Expo).",
+  "author": "Hamet Kévin E. ODOUTAN - @vinoskey524",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vinoskey524/panda.git"
+  },
   "main": "./dist/main.js",
-  "types": "./dist/main.d.ts",
+  "devDependencies": {
+    "@types/bun": "latest",
+    "esbuild": "^0.25.12",
+    "tsup": "^8.5.0"
+  },
+  "peerDependencies": {
+    "typescript": "^5.0.0",
+    "react": ">=18"
+  },
   "exports": {
     "import": {
       "types": "./dist/main.d.ts",
       "default": "./dist/main.js"
     }
   },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/vinoskey524/panda.git"
-  },
-  "author": "Hamet Kévin E. ODOUTAN - @vinoskey524",
   "bugs": {
     "url": "https://github.com/vinoskey524/panda/issues"
   },
+  "description": "Advanced JSON-based state manager for React and React Native (Bare and Expo).",
   "homepage": "https://package524.vercel.app",
   "keywords": [
     "panda",
@@ -57,16 +64,6 @@
     "p": "clear && npm publish --access public",
     "f": "clear && npm info @vinoskey524/panda"
   },
-  "devDependencies": {
-    "@types/bun": "latest",
-    "esbuild": "^0.25.12",
-    "tsup": "^8.5.0"
-  },
-  "peerDependencies": {
-    "typescript": "^5.0.0",
-    "react": ">=18"
-  },
-  "dependencies": {
-    "@vinoskey524/oh-my-json": "^1.0.1"
-  }
+  "type": "module",
+  "types": "./dist/main.d.ts"
 }

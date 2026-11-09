@@ -9,18 +9,11 @@
 */
 
 import { useRef, useMemo, useCallback, useSyncExternalStore } from 'react';
-import json from '@vinoskey524/oh-my-json';
 
 /* ---------------------------------------------- Types ---------------------------------------------- */
 
 type MAIN_TYPE = {
     init: (state: PANDA_STORE_STATE) => PANDA_TYPE
-};
-
-type INIT_TYPE = {
-    type: 'client' | 'server',
-    family: string,
-    address: string
 };
 
 type PANDA_TYPE = {
@@ -44,15 +37,20 @@ type PANDA_TYPE = {
     */
     unwatch: (x: string | string[]) => void,
 
+    /** 
+    * Serialize the store for the browser (SSR) 
+    */
+    dehydrate: (onSkip?: (paths: string[]) => void) => string,
+
+    /** 
+    * Load a dehydrated snapshot into the store (SSR, browser side) 
+    */
+    hydrate: (snapshot: string | JSON_DEFAULT_TYPE) => FUNCTION_DEFAULT_RETURN_TYPE,
+
     /**
     * Preserve pandata's references
     */
     preserve: (pandata: any) => any,
-
-    /**
-    * GenID
-    */
-    genID: () => string,
 
     /**
     * Inspect shortcuts
@@ -74,20 +72,32 @@ type WATCH_ON_ARG_TYPE = {
     delete?: ((key: string | null, data: DEFAULT_TYPES_TYPE) => void) | Function
 };
 
-type WATCHER_DATA_TYPE = {
-    [path: string]: {
-        get: { [watcherId: string]: { key: null, callback: Function } },
-        watch: {
-            set: { [watcherId: string]: { key: string | null, callback: Function } },
-            update: { [watcherId: string]: { key: string | null, callback: Function } },
-            delete: { [watcherId: string]: { key: string | null, callback: Function } }
-        }
+type WATCHER_ENTRY_TYPE = {
+    get: { [watcherId: string]: { key: null, callback: Function } },
+    watch: {
+        set: { [watcherId: string]: { key: string | null, callback: Function } },
+        update: { [watcherId: string]: { key: string | null, callback: Function } },
+        delete: { [watcherId: string]: { key: string | null, callback: Function } }
     }
 };
 
-type PRESERVE_DATA_TYPE = {
-    [id: string]: object | Function
-};
+/** Watched path -> its watchers */
+type WATCHER_DATA_TYPE = Map<string, WATCHER_ENTRY_TYPE>;
+
+/** "$pre_..." id -> the preserved object/function */
+type PRESERVE_DATA_TYPE = Map<string, object | Function>;
+
+/** Flat key (e.g. "user.tags.[0]") -> its value */
+type FLAT_STORE_TYPE = Map<string, any>;
+
+/** Shortcut (e.g. "a...b") -> the path it resolves to (undefined if it can't be resolved) */
+type SHORTCUTS_DATA_TYPE = Map<string, string | undefined>;
+
+/** The nested store: every object is a "Map" (key -> child), every array is an array, anything else is a leaf */
+type STORE_TREE_TYPE = Map<string, any>;
+
+/** - */
+type READ_CACHE_TYPE = Map<string, { data: any }>;
 
 type WATCHER_SOURCE_TYPE = 'get' | 'watch';
 type WATCHER_CALLBACK_TYPE = 'set' | 'update' | 'delete';
@@ -110,6 +120,15 @@ type JSON_DEFAULT_TYPE = { [key: string]: any };
 type JSON_STRING_TYPE = { [key: string]: string };
 
 type FUNCTION_DEFAULT_RETURN_TYPE = { ok: boolean, log: string, data: any };
+
+/** A path token: an object key (string) or an array index (number) */
+type PATH_TOKEN = string | number;
+
+/** What a write keeps track of while it edits the stores */
+type EDIT_CTX = {
+    touchKey: (key: string) => void, /* Called right before a flat key is modified, so that it can be undone */
+    containers: Map<string, PATH_TOKEN[]> /* Containers to tidy up once the whole write is applied */
+};
 
 /*
 -
@@ -159,10 +178,10 @@ declare const preservedBrand: unique symbol;
 * Panda never looks inside a preserved value, so no sub-paths are generated for it.
 * @example type Schema = { cart: Ref<{ items: string[] }> }
 */
-type Ref<V> = { readonly [refBrand]: V };
+export type Ref<V> = { readonly [refBrand]: V };
 
 /** Token returned by "preserve()". Only meaningful for the type-checker. */
-type Preserved<V> = string & { readonly [preservedBrand]: V };
+export type Preserved<V> = string & { readonly [preservedBrand]: V };
 
 /** Recursion budget for path generation (TypeScript gives up around 50 nested instantiations) */
 type Prev = [never, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
@@ -194,7 +213,7 @@ type WalkEntries<T, P extends string, D extends number> =
 type Entries<T> = WalkEntries<T, '', 12>;
 
 /** Every valid path of a schema. Falls back to "string" when no schema is given. */
-type PandaPaths<T> = IsAny<T> extends true ? string : Entries<T>['p'];
+export type PandaPaths<T> = IsAny<T> extends true ? string : Entries<T>['p'];
 
 /** Raw (still "Ref"-wrapped) type found at a concrete path */
 type RawAt<T, P extends string> =
@@ -243,6 +262,7 @@ type PandaState<T> = DeepPartial<Unref<T>>;
 
 type PathArg<T> = PandaPaths<T> | Shortcut;
 type GetArg<T> = '*' | PathArg<T> | readonly PathArg<T>[] | { readonly [key: string]: PathArg<T> };
+type DeleteArg<T> = PathArg<T> | readonly PathArg<T>[];
 type WatchArg<T> = PathArg<T> | { readonly [key: string]: PathArg<T> };
 
 type GetValue<T, P extends string> =
@@ -281,6 +301,7 @@ type CheckArg<T, A> =
 type WriteValue<V, Updatable extends boolean = true> =
     [V] extends [Ref<infer R>] ? Preserved<R> :
     [V] extends [Function] ? Preserved<V> :
+    [V] extends [Date | Map<any, any> | Set<any>] ? never : /* Not supported: flattened to nothing */
     [V] extends [readonly (infer U)[]] ? readonly WriteValue<U, false>[] :
     [V] extends [object] ? WriteTree<V> :
     Updatable extends true ? V | ((current: V) => V) : V;
@@ -358,7 +379,7 @@ interface WatchHandle<T, A> {
 
 /* ---------- The typed API ---------- */
 
-interface PandaTyped<T> {
+export interface PandaTyped<T> {
     /** Store pandata */
     store: StoreFn<T>;
 
@@ -374,11 +395,14 @@ interface PandaTyped<T> {
     /** Unwatch pandata */
     unwatch: (watcherId: string | string[]) => void;
 
+    /** Serialize the whole store into a <script>-safe string (SSR). Preserved values are dropped. */
+    dehydrate: (onSkip?: (paths: string[]) => void) => string;
+
+    /** Load a dehydrated snapshot (string or parsed object) into the store. Use it in the browser before hydrating React. */
+    hydrate: (snapshot: string | object) => { ok: boolean, log: string, data?: any };
+
     /** Preserve pandata's references */
     preserve: <V extends object | Function>(pandata: V) => Preserved<V>;
-
-    /** Generate an ID */
-    genID: () => string;
 
     /** Inspect shortcuts */
     inspectShortcuts: () => { [shortcut: string]: PandaPaths<T> | undefined };
@@ -419,9 +443,12 @@ interface PandaTyped<T> {
 
 /* ---------------------------------------------- Constants ---------------------------------------------- */
 
-const _dev_ = false;
+let _dev_ = false;
 
 const _default_valid_types_: VALID_TYPES_TYPE[] = ['bigint', 'string', 'number', 'boolean', 'function', 'symbol', 'array', 'json', 'null', 'undefined'];
+
+/** Max number of memoized reads per instance (dynamic paths could otherwise grow it forever) */
+const _read_cache_max_ = 1000;
 
 /*
 -
@@ -459,23 +486,25 @@ const _default_valid_types_: VALID_TYPES_TYPE[] = ['bigint', 'string', 'number',
 /* ---------------------------------------------- DATA Logistic ---------------------------------------------- */
 
 type PANDA_STORE_STATE = {
-    storeDATA: { current: JSON_DEFAULT_TYPE };
-    storeTopLevelDATA: { current: JSON_DEFAULT_TYPE };
+    storeDATA: { current: STORE_TREE_TYPE };
+    storeTopLevelDATA: { current: FLAT_STORE_TYPE };
     watcherDATA: { current: WATCHER_DATA_TYPE };
     preserveDATA: { current: PRESERVE_DATA_TYPE };
-    shortcutsDATA: { current: JSON_DEFAULT_TYPE };
+    shortcutsDATA: { current: SHORTCUTS_DATA_TYPE };
     storeVersion: { current: number };
     storeListeners: { current: Set<() => void> };
+    readCache: { current: READ_CACHE_TYPE }; /* Memoized reads, by resolved path */
 };
 
 const createPandaStoreState = (): PANDA_STORE_STATE => ({
-    storeDATA: { current: {} },
-    storeTopLevelDATA: { current: {} },
-    watcherDATA: { current: {} },
-    preserveDATA: { current: {} },
-    shortcutsDATA: { current: {} },
+    storeDATA: { current: new Map() },
+    storeTopLevelDATA: { current: new Map() },
+    watcherDATA: { current: new Map() },
+    preserveDATA: { current: new Map() },
+    shortcutsDATA: { current: new Map() },
     storeVersion: { current: 0 },
-    storeListeners: { current: new Set() }
+    storeListeners: { current: new Set() },
+    readCache: { current: new Map() }
 });
 
 /** Browser instances retain the historical shared store; server instances are isolated per createPanda() call. */
@@ -486,21 +515,18 @@ let activePandaStoreState = sharedPandaStoreState;
 const withPandaStoreState = <T>(state: PANDA_STORE_STATE, operation: () => T): T => {
     const previousState = activePandaStoreState;
     activePandaStoreState = state;
-    try {
-        return operation();
-    } finally {
-        activePandaStoreState = previousState;
-    }
+    try { return operation() }
+    finally { activePandaStoreState = previousState }
 };
 
 /** State references resolve against the currently executing Panda instance. */
 const storeDATA = {
     get current() { return activePandaStoreState.storeDATA.current; },
-    set current(value: JSON_DEFAULT_TYPE) { activePandaStoreState.storeDATA.current = value; }
+    set current(value: STORE_TREE_TYPE) { activePandaStoreState.storeDATA.current = value; }
 };
 const storeTopLevelDATA = {
     get current() { return activePandaStoreState.storeTopLevelDATA.current; },
-    set current(value: JSON_DEFAULT_TYPE) { activePandaStoreState.storeTopLevelDATA.current = value; }
+    set current(value: FLAT_STORE_TYPE) { activePandaStoreState.storeTopLevelDATA.current = value; }
 };
 const watcherDATA = {
     get current() { return activePandaStoreState.watcherDATA.current; },
@@ -512,7 +538,7 @@ const preserveDATA = {
 };
 const shortcutsDATA = {
     get current() { return activePandaStoreState.shortcutsDATA.current; },
-    set current(value: JSON_DEFAULT_TYPE) { activePandaStoreState.shortcutsDATA.current = value; }
+    set current(value: SHORTCUTS_DATA_TYPE) { activePandaStoreState.shortcutsDATA.current = value; }
 };
 const storeVersion = {
     get current() { return activePandaStoreState.storeVersion.current; },
@@ -521,6 +547,10 @@ const storeVersion = {
 const storeListeners = {
     get current() { return activePandaStoreState.storeListeners.current; },
     set current(value: Set<() => void>) { activePandaStoreState.storeListeners.current = value; }
+};
+const readCache = {
+    get current() { return activePandaStoreState.readCache.current; },
+    set current(value: Map<string, { data: any }>) { activePandaStoreState.readCache.current = value; }
 };
 
 /*
@@ -560,9 +590,6 @@ const storeListeners = {
 
 /** Log */
 const logFunc = (...log: any[]): void => { if (_dev_) console.log(...log) };
-
-/** Permanent log */
-const plogFunc = (...log: any[]): void => { console.log(...log) };
 
 /** Generate ID */
 const generateIdFunc = (): string => {
@@ -605,129 +632,349 @@ const getRealTypeFunc = (data: any, validTypes?: VALID_TYPES_TYPE[]): GET_REAL_T
 };
 
 /** 
-* Append data into a JSON Object 
-* Warning: It will directly modify the source/original object. 
+* True if "key" is "path" itself, or lives under it (on a path boundary). 
+* "user" matches "user.name" but not "username", "list.[1" matches "list.[1]" and "list.[1_0]" but not "list.[10]". 
 */
-const jsonAppendDataFunc = (x: { sourceObj: JSON_DEFAULT_TYPE, pathChain: string, data: any, filter?: string[] }): JSON_DEFAULT_TYPE => {
-    const sourceObj = x.sourceObj;
-    let cursor: any = sourceObj;
-    try {
-        const pathChain = x.pathChain;
-        const value = x.data;
-        const filter = x.filter;
+const isPathOrChildFunc = (key: string, path: string): boolean => {
+    if (!key.startsWith(path)) return false;
+    if (key.length === path.length) return true;
+    const next = key[path.length];
+    if (next === '.') return true;
+    const insideBracket = path.lastIndexOf('[') > path.lastIndexOf(']'); /* The last bracket of "path" has been removed */
+    return insideBracket && (next === ']' || next === '_');
+};
 
-        const pathTab = pathChain.split('.');
-        let cursorType: 'json' | 'array' | undefined = 'json';
+/** Find "seg" in "key", starting at "from", only where it ends on a path boundary (-1 if not found) */
+const findSegmentFunc = (key: string, seg: string, from: number): number => {
+    let i = key.indexOf(seg, Math.max(from, 0));
+    while (i !== -1) {
+        if (isPathOrChildFunc(key.slice(i), seg)) return i;
+        i = key.indexOf(seg, i + 1);
+    }
+    return -1;
+};
 
-        for (let n = 0; n < pathTab.length; n++) {
-            const currentPath = pathTab[n]; /* current path */
-            const nextPath = pathTab[n + 1] ?? undefined;
+/** Empty arrays / JSON objects have no leaf, so they are stored as-is */
+const isEmptyContainerFunc = (v: any): boolean =>
+    (Array.isArray(v) && v.length === 0) || (getRealTypeFunc(v).type === 'json' && hasNoKeysFunc(v));
 
-            /* True if the current path is an array index */
-            const isArrayIndex = getPathTypeFunc(currentPath) === 'array';
+/** Strict equality, except that two empty containers of the same kind are equal */
+const sameValueFunc = (a: any, b: any): boolean =>
+    a === b || (isEmptyContainerFunc(a) && isEmptyContainerFunc(b) && Array.isArray(a) === Array.isArray(b));
 
-            /* - */
-            if (nextPath) { /* Navigate through the JSON tree */
-                const currentPathType = getPathTypeFunc(nextPath);
-                if (!cursorType)
-                    continue;
+/** Only plain JSON objects are supported (not Date, Map, Set, class instances...) */
+const assertPlainObjectFunc = (v: any): void => {
+    if (typeof v !== 'object' || v === null || Array.isArray(v))
+        return;
+    const proto = Object.getPrototypeOf(v);
+    if (proto !== Object.prototype && proto !== null)
+        throw new Error(`Invalid type ("${proto?.constructor?.name ?? 'object'}") found!`);
+};
 
-                /* - */
-                let arrayInit: any[] | undefined = undefined;
-                if (currentPathType === 'array' && filter) {
-                    const idx = n + 1;
-                    arrayInit = buildArrayFromIndexPatternFunc({ patchChain: filter!, pathIndex: idx });
-                }
-
-                if (!hasPropertyFunc(cursor, currentPath)) {
-                    if (isArrayIndex) {
-                        const idxes = currentPath.replaceAll('[', '').replaceAll(']', '').split('_');
-                        for (let d = 0; d < idxes.length; d++) {
-                            const idx = Number(idxes[d]);
-                            const isLastLoop = d === (idxes.length - 1);
-                            const cursorVal = cursor[idx];
-                            if (isLastLoop)
-                                cursor[idx] =
-                                    currentPathType === 'json' ?
-                                        cursorVal === null ?
-                                            {} :
-                                            cursorVal :
-                                        arrayInit;
-                            cursor = cursor[idx];
-                        }
-
-                    } else {
-                        cursor[currentPath] = currentPathType === 'json' ? {} : arrayInit;
-                        cursor = cursor[currentPath];
-                    }
-
-                } else {
-                    if (currentPathType === 'array' && cursor[currentPath] === undefined)
-                        cursor[currentPath] = arrayInit;
-                    cursor = cursor[currentPath];
-                }
-
-                /* Set cursor type */
-                cursorType =
-                    getRealTypeFunc(cursor).type === 'array' ?
-                        'array' :
-                        getRealTypeFunc(cursor).type === 'json' ?
-                            'json' : undefined;
-
-            } else { /* Set value */
-                switch (cursorType) {
-                    case 'json': { cursor[currentPath] = value } break;
-
-                    case 'array': {
-                        const tab: any[] = currentPath.replaceAll('[', '').replaceAll(']', '').split('_');
-                        for (let k = 0; k < tab.length; k++) {
-                            const idx = Number(tab[k]);
-                            const isLastLoop = k === (tab.length - 1);
-                            if (!isLastLoop)
-                                cursor = cursor[idx];
-                            else
-                                cursor[idx] = value;
-                        }
-                    } break;
-
-                    default: { };
-                };
+/** Get a value from a JSON object/array, following panda's path syntax: "a.b", "a.[0]", "a.[0_1]", "a.[0].b" */
+const getFromPathFunc = (source: any, path: string): any => {
+    if (path.length === 0) return source;
+    let cursor: any = source;
+    const segments = path.split('.');
+    for (let s = 0; s < segments.length; s++) {
+        const seg = segments[s];
+        if (seg[0] === '[') {
+            const idxTab = seg.replaceAll('[', '').replaceAll(']', '').split('_');
+            for (let i = 0; i < idxTab.length; i++) {
+                if (!Array.isArray(cursor)) return undefined;
+                cursor = cursor[Number(idxTab[i])];
             }
+        } else {
+            if (!hasPropertyFunc(cursor, seg)) return undefined;
+            cursor = cursor[seg];
         }
-
-    } catch (e: any) { logFunc('Err :: jsonAppendDataFunc() =>', e.message) }
+    }
     return cursor;
 };
 
-/** Clone object */
-const cloneObjectFunc = (object: JSON_DEFAULT_TYPE | any[]): FUNCTION_DEFAULT_RETURN_TYPE => {
-    const val = object;
+/** Memoize a successful read */
+const cacheReadFunc = (path: string, data: any): void => {
+    if (readCache.current.size >= _read_cache_max_)
+        readCache.current.clear();
+    readCache.current.set(path, { data });
+};
 
-    /* Simplify data */
-    const a = topLevelJsonFunc({ data: val });
-    if (!a.ok) return a;
-    const obj = a.data;
+/** 
+* Forget every memoized read that a write could have changed: the ones at, above or below a changed path. 
+* Reads of untouched paths stay in the cache, so they keep the very same reference. 
+*/
+const invalidateReadCacheFunc = (changedKeys: string[]): void => {
+    const cache = readCache.current;
+    if (cache.size === 0 || changedKeys.length === 0)
+        return;
+    cache.delete('*'); /* The whole-store read depends on everything */
+    const stripped = changedKeys.map((k) => formatPathFunc({ path: k, removeLastBracket: true }));
+    const cached = Array.from(cache.keys());
+    for (let c = 0; c < cached.length; c++)
+        for (let i = 0; i < changedKeys.length; i++)
+            if (
+                isPathOrChildFunc(changedKeys[i], cached[c]) || /* a changed key lives under the cached path */
+                isPathOrChildFunc(cached[c], changedKeys[i]) || /* the cached path lives under a changed key */
+                isPathOrChildFunc(cached[c], stripped[i])       /* same, for "list.[0]" vs "list.[0_1" */
+            ) { cache.delete(cached[c]); break; }
+};
 
-    /* Set preserved data */
-    for (let k in obj) {
-        const val = obj[k];
-        if (typeof val !== 'string')
-            continue;
-        const isPreserved = val.indexOf('$pre_') === 0;
-        if (isPreserved) obj[k] = preserveDATA.current[val];
+/** True if both are the same value, or arrays/plain objects whose items are all strictly equal */
+const shallowSameFunc = (a: any, b: any): boolean => {
+    if (a === b) return true;
+    if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false;
+    if (Array.isArray(a) !== Array.isArray(b)) return false;
+    const ka = Object.keys(a);
+    const kb = Object.keys(b);
+    if (ka.length !== kb.length) return false;
+    for (let i = 0; i < ka.length; i++)
+        if (!hasPropertyFunc(b, ka[i]) || a[ka[i]] !== b[ka[i]]) return false;
+    return true;
+};
+
+/** "a.[0_1].b" -> ["a", 0, 1, "b"] (object keys stay strings, array indexes become numbers) */
+const tokenizePathFunc = (path: string): PATH_TOKEN[] => {
+    const tokens: PATH_TOKEN[] = [];
+    const segments = path.split('.');
+    for (let i = 0; i < segments.length; i++) {
+        const seg = segments[i];
+        if (seg.charCodeAt(0) === 91) { /* "[" */
+            const idx = seg.replaceAll('[', '').replaceAll(']', '').split('_');
+            for (let j = 0; j < idx.length; j++)
+                tokens.push(Number(idx[j]));
+        } else tokens.push(seg);
     }
-
-    /* Reverse and return data */
-    const b = reverseTopLevelJsonFunc({ data: obj });
-    return b.data; /* "current" comes from "val" above */
+    return tokens;
 };
 
-/** Cache store top-leveled data */
-const cacheStoreTopLevelDataFunc = (): void => {
-    const a = topLevelJsonFunc({ data: storeDATA.current });
-    if (!a.ok) return;
-    storeTopLevelDATA.current = a.data;
+/** ["a", 0, 1, "b"] -> "a.[0_1].b" (the flat key format), optionally only the first "end" tokens */
+const joinPathFunc = (tokens: PATH_TOKEN[], end: number = tokens.length): string => {
+    let out = '';
+    let prevIsIndex = false;
+    for (let i = 0; i < end; i++) {
+        const t = tokens[i];
+        if (typeof t === 'number') {
+            if (prevIsIndex) out = out.slice(0, -1) + '_' + t + ']';
+            else out += (out.length > 0 ? '.' : '') + '[' + t + ']';
+            prevIsIndex = true;
+        } else {
+            out += (out.length > 0 ? '.' : '') + t;
+            prevIsIndex = false;
+        }
+    }
+    return out;
 };
+
+/** True if the plain object has no key (stops at the first one, so a wide object costs nothing) */
+const hasNoKeysFunc = (o: any): boolean => { for (const _ in o) return false; return true; };
+
+/** Objects ("Map") and arrays (the nested store only holds those, and plain values) */
+const isContainerFunc = (v: any): boolean => v !== null && typeof v === 'object';
+
+/** True if a node of the nested store has no child (an empty "Map" or an empty array) */
+const isEmptyNodeFunc = (node: any): boolean => node instanceof Map ? node.size === 0 : Array.isArray(node) && node.length === 0;
+
+/** True if "node" has a child at "tok" (an index for arrays, a key for objects) */
+const hasChildFunc = (node: any, tok: PATH_TOKEN): boolean => {
+    if (Array.isArray(node)) return typeof tok === 'number' && tok >= 0 && tok < node.length;
+    if (node instanceof Map) return typeof tok === 'string' && node.has(tok);
+    return false;
+};
+
+/** The child of "node" at "tok" (check "hasChildFunc" first) */
+const childOfFunc = (node: any, tok: PATH_TOKEN): any => node instanceof Map ? node.get(tok as string) : node[tok];
+
+/** Walk the nested store; undefined if the path isn't there */
+const getNodeFunc = (root: any, tokens: PATH_TOKEN[], end: number = tokens.length): any => {
+    let node = root;
+    for (let i = 0; i < end; i++) {
+        if (!hasChildFunc(node, tokens[i]))
+            return undefined;
+        node = childOfFunc(node, tokens[i]);
+    }
+    return node;
+};
+
+/** 
+* True if something lives at the first "end" tokens: a container, or a leaf that really has a flat key 
+* (an array hole is a "null" in the nested store but has no key, so it doesn't count). 
+*/
+const existsAtFunc = (tokens: PATH_TOKEN[], end: number): boolean => {
+    const node = getNodeFunc(storeDATA.current, tokens, end);
+    if (node === undefined)
+        return false;
+    return isContainerFunc(node) || storeTopLevelDATA.current.has(joinPathFunc(tokens, end));
+};
+
+/** Every flat key (leaf or empty container) that lives under "node" */
+const collectLeafKeysFunc = (node: any, tokens: PATH_TOKEN[], out: string[]): void => {
+    if (isContainerFunc(node)) {
+        const keys: PATH_TOKEN[] = Array.isArray(node) ? node.map((_: any, i: number) => i) : Array.from((node as STORE_TREE_TYPE).keys());
+        /* Empty container: it is a key itself */
+        if (keys.length === 0) {
+            if (tokens.length > 0) out.push(joinPathFunc(tokens));
+            return;
+        }
+        /* - */
+        for (let i = 0; i < keys.length; i++) {
+            tokens.push(keys[i]);
+            collectLeafKeysFunc(childOfFunc(node, keys[i]), tokens, out);
+            tokens.pop();
+        }
+        return;
+    }
+    const key = joinPathFunc(tokens);
+    if (storeTopLevelDATA.current.has(key)) out.push(key); /* Skips array holes */
+};
+
+/** A value to put in the nested store: empty containers are copied, never shared with the flat store */
+const copyLeafFunc = (v: any): any => isEmptyContainerFunc(v) ? (Array.isArray(v) ? [] : new Map()) : v;
+
+/** - */
+const touchContainerFunc = (ctx: EDIT_CTX, tokens: PATH_TOKEN[]): void => {
+    const k = joinPathFunc(tokens);
+    if (!ctx.containers.has(k))
+        ctx.containers.set(k, tokens.slice());
+};
+
+/** - */
+const putChildFunc = (node: any, tok: PATH_TOKEN, value: any, ctx: EDIT_CTX, nodeTokens: PATH_TOKEN[]): void => {
+    if (typeof tok === 'number' && node.length < tok) {
+        touchContainerFunc(ctx, nodeTokens); /* The gap is filled with "null" (see "normalizeTreeFunc") */
+        while (node.length < tok) node.push(null);
+    }
+    if (node instanceof Map) node.set(tok as string, value);
+    else node[tok] = value;
+};
+
+/** - */
+const assertKindFunc = (node: any, tokens: PATH_TOKEN[], i: number): void => {
+    if ((typeof tokens[i] === 'number') !== Array.isArray(node))
+        throw new Error(`can't write "${joinPathFunc(tokens, i + 1)}": its parent is ${Array.isArray(node) ? 'an array' : 'an object'}`);
+};
+
+/** 
+* Write one leaf into the nested store, creating the containers on the way. 
+* It checks everything first and only then attaches the new branch, so a conflict leaves the store untouched. 
+*/
+const setInTreeFunc = (root: any, tokens: PATH_TOKEN[], value: any, ctx: EDIT_CTX): void => {
+    let node = root;
+    let i = 0;
+    for (; i < tokens.length - 1; i++) {
+        assertKindFunc(node, tokens, i);
+        if (!hasChildFunc(node, tokens[i]))
+            break;
+        const child = childOfFunc(node, tokens[i]);
+        if (child === null) { /* A hole (or a "null" leaf): it gets replaced, and loses its key if it had one */
+            const key = joinPathFunc(tokens, i + 1);
+            if (storeTopLevelDATA.current.has(key)) {
+                ctx.touchKey(key);
+                storeTopLevelDATA.current.delete(key);
+            }
+            break;
+        }
+        if (!isContainerFunc(child) || Array.isArray(child) !== (typeof tokens[i + 1] === 'number'))
+            throw new Error(`"${joinPathFunc(tokens, i + 1)}" holds a value that can't contain "${joinPathFunc(tokens, i + 2)}"`);
+        node = child;
+    }
+    assertKindFunc(node, tokens, i);
+
+    /* Build the missing branch apart, then attach it */
+    let branch: any = value;
+    for (let j = tokens.length - 1; j > i; j--) {
+        const container: any = typeof tokens[j] === 'number' ? [] : new Map();
+        putChildFunc(container, tokens[j], branch, ctx, tokens.slice(0, j));
+        branch = container;
+    }
+    putChildFunc(node, tokens[i], branch, ctx, tokens.slice(0, i));
+};
+
+/** Delete one leaf from the nested store (its flat key must already be gone). Emptied containers are tidied up later. */
+const deleteFromTreeFunc = (root: any, tokens: PATH_TOKEN[], ctx: EDIT_CTX): void => {
+    let node = root;
+    for (let i = 0; i < tokens.length - 1; i++) {
+        if (!hasChildFunc(node, tokens[i])) return;
+        node = childOfFunc(node, tokens[i]);
+        if (!isContainerFunc(node)) return;
+    }
+    const last = tokens[tokens.length - 1];
+    if (!hasChildFunc(node, last)) return;
+    if (Array.isArray(node)) node[last as number] = null; /* A hole, for now */
+    else (node as STORE_TREE_TYPE).delete(last as string);
+    touchContainerFunc(ctx, tokens.slice(0, tokens.length - 1));
+};
+
+/** 
+* Tidy up the containers a write touched, deepest first: 
+* - trailing array holes are dropped, the other holes become real "null" items (an array can't have a gap), 
+* - a container left empty by a deletion disappears (an empty one that was written on purpose has its own key, it stays). 
+* This is the result a full rebuild of the store used to give, without rebuilding it. 
+*/
+const normalizeTreeFunc = (ctx: EDIT_CTX): void => {
+    const flat = storeTopLevelDATA.current;
+    const tree = storeDATA.current;
+    const buckets: PATH_TOKEN[][][] = [];
+    const queued = new Set<string>();
+    const queue = (tokens: PATH_TOKEN[]): void => {
+        const k = joinPathFunc(tokens);
+        if (queued.has(k)) return;
+        queued.add(k);
+        if (!buckets[tokens.length]) buckets[tokens.length] = [];
+        buckets[tokens.length].push(tokens);
+    };
+    ctx.containers.forEach((tokens) => queue(tokens));
+
+    for (let depth = buckets.length - 1; depth >= 0; depth--) {
+        const list = buckets[depth];
+        if (!list) continue;
+        for (let n = 0; n < list.length; n++) {
+            const tokens = list[n];
+            const node = getNodeFunc(tree, tokens);
+            if (!isContainerFunc(node)) continue; /* Already gone */
+
+            if (Array.isArray(node)) {
+                while (node.length > 0 && node[node.length - 1] === null && !flat.has(joinPathFunc([...tokens, node.length - 1]))) node.pop();
+                for (let i = 0; i < node.length; i++) {
+                    if (node[i] !== null) continue;
+                    const key = joinPathFunc([...tokens, i]);
+                    if (flat.has(key)) continue;
+                    ctx.touchKey(key);
+                    flat.set(key, null);
+                }
+            }
+
+            const empty = isEmptyNodeFunc(node);
+            if (!empty || tokens.length === 0 || flat.has(joinPathFunc(tokens))) continue;
+
+            /* Left empty by a deletion: remove it from its parent (which then needs tidying too) */
+            const parentTokens = tokens.slice(0, tokens.length - 1);
+            const parent = getNodeFunc(tree, parentTokens);
+            const tok = tokens[tokens.length - 1];
+            if (Array.isArray(parent)) parent[tok as number] = null;
+            else (parent as STORE_TREE_TYPE).delete(tok as string);
+            queue(parentTokens);
+        }
+    }
+};
+
+/** Deep copy of a part of the nested store as plain JSON, giving back what "preserve" holds instead of its "$pre_" references */
+const cloneTreeFunc = (node: any): any => {
+    if (Array.isArray(node)) {
+        const out: any[] = new Array(node.length);
+        for (let i = 0; i < node.length; i++) out[i] = cloneTreeFunc(node[i]);
+        return out;
+    }
+    if (node instanceof Map) { /* The nested store holds "Map"s, what is handed out are plain objects */
+        const out: JSON_DEFAULT_TYPE = {};
+        node.forEach((child, k) => { out[k] = cloneTreeFunc(child); });
+        return out;
+    }
+    if (typeof node === 'string' && isPreservedFunc(node)) return preserveDATA.current.get(node);
+    return node;
+};
+
+/** Clone object */
+const cloneObjectFunc = (object: STORE_TREE_TYPE | any[]): any => cloneTreeFunc(object);
 
 /** Add shortcut */
 const addShortcutFunc = (path: string, value: any): void => {
@@ -744,7 +991,7 @@ const addShortcutFunc = (path: string, value: any): void => {
         tab.push(path);
     }
     const key = tab.join('.');
-    shortcutsDATA.current[key] = value;
+    shortcutsDATA.current.set(key, value);
 };
 
 /** Extract main form a path */
@@ -773,7 +1020,6 @@ const resolvePathFunc = (x: { path: string }): string => {
 
     /* - */
     const split = path.split('...');
-    const lastKey = split[1];
     let duo = [split.shift(), null];
     do {
         /* - */
@@ -782,11 +1028,14 @@ const resolvePathFunc = (x: { path: string }): string => {
         /* Filter */
         const p0 = formatPathFunc({ path: duo[0] + '.', removeLastBracket: true });
         const p1 = formatPathFunc({ path: '.' + duo[1], removeLastBracket: true });
-        const tab = Object.keys(storeTopLevelDATA.current);
-        let filter = tab.filter((e) =>
-            e.includes(p0) && e.indexOf(p0) === 0 &&
-            e.includes(p1) && e.indexOf(p1) >= (p0.length - 1)
-        );
+        const p1Raw = formatPathFunc({ path: '.' + duo[1] });
+        /* End position of the target segment inside a full path (-1 if it isn't there) */
+        const endOf = (fp: string): number => {
+            const i = findSegmentFunc(fp, p1, p0.length - 1);
+            return i === -1 ? -1 : i + (fp.startsWith(p1Raw, i) ? p1Raw.length : p1.length);
+        };
+        const tab = Array.from(storeTopLevelDATA.current.keys());
+        let filter = tab.filter((e) => e.startsWith(p0) && endOf(e) !== -1);
         let flen = filter.length;
 
         /* If no path found */
@@ -806,14 +1055,14 @@ const resolvePathFunc = (x: { path: string }): string => {
             /* Process each path */
             for (let i = 0; i < flen; i++) {
                 const pf = filter[i];
-                const tb = pf.split(lastKey);
+                const end = endOf(pf);
 
                 /* Check if the last/target key appears once, in the middle of the full path */
-                const inMiddle = tb.length === 2 && tab[1].length > 0;
-                ltab.push(inMiddle ? true : false);
+                const inMiddle = findSegmentFunc(pf, p1, end) === -1 && end < pf.length;
+                ltab.push(inMiddle);
 
-                /* Save the path before the target key */
-                lpaf[tb[0]] = tb[0];
+                /* Save the path up to the target key */
+                lpaf[pf.slice(0, end)] = pf.slice(0, end);
             }
 
             /* Update result and length if all paths result in the same JSON object */
@@ -822,8 +1071,7 @@ const resolvePathFunc = (x: { path: string }): string => {
             const allPathsResultInTheSameJSONObject = appearsOnceInMiddle && samePrefixPath;
             if (allPathsResultInTheSameJSONObject) {
                 const fpath = filter[0];
-                const idx = fpath.indexOf(lastKey);
-                filter = [fpath.slice(0, idx) + lastKey];
+                filter = [fpath.slice(0, endOf(fpath))];
                 flen = filter.length;
             }
         }
@@ -886,9 +1134,7 @@ const resolvePathFunc = (x: { path: string }): string => {
         /* If only one path found */
         else {
             const fpath = filter[0];
-            const idx = fpath.indexOf(lastKey);
-            const str = fpath.slice(0, idx) + lastKey;
-            duo[0] = str;
+            duo[0] = fpath.slice(0, endOf(fpath));
         }
 
     } while (split.length !== 0);
@@ -905,100 +1151,59 @@ const extractPandataFromPathFunc = (x: { path: '*' | string }): FUNCTION_DEFAULT
     let res: FUNCTION_DEFAULT_RETURN_TYPE = { ok: true, log: '', data: undefined };
     try {
         let path = x.path;
-        if (path === '*')
+        if (path === '*') {
+            const hit = readCache.current.get('*');
+            if (hit) {
+                res.data = hit.data;
+                return res;
+            }
             res.data = cloneObjectFunc(storeDATA.current);
-        else {
+            cacheReadFunc('*', res.data);
+
+        } else {
             /* Format path */
             path = formatPathFunc({ path, removeLastBracket: true });
             path = resolvePathFunc({ path });
 
-            /* Seek path */
-            const keys = Object.keys(storeTopLevelDATA.current);
-            const filter = keys.filter((e) => e.includes(path) && e.indexOf(path) === 0);
-            if (filter.length === 0) {
-                /* Process preserved path */
-                let prePath = '';
-                let preVal = '';
-                let rpath = '';
-                const klen = keys.length;
-                if (klen > 0)
-                    for (let i = 0; i < klen; i++) {
-                        const ckey = keys[i];
-                        if (path.includes(ckey) && path.indexOf(ckey) === 0) {
-                            const val = storeTopLevelDATA.current[ckey];
-                            if (typeof val !== 'string')
-                                break;
-                            const isPreserved = val.indexOf('$pre_') === 0;
-                            if (isPreserved) {
-                                prePath = ckey;
-                                preVal = val;
-                                rpath = path.replace(ckey + '.', '');
-                            }
-                            break;
-                        }
+            /* Nothing changed under this path since the last read: hand back the same value (stable reference) */
+            const hit = readCache.current.get(path);
+            if (hit) {
+                res.data = hit.data;
+                return res;
+            }
+
+            /* Look the path up in the nested store */
+            const tokens = tokenizePathFunc(path);
+            const exists = existsAtFunc(tokens, tokens.length);
+
+            /* Process preserved path: a preserved value may sit above this path */
+            if (!exists) {
+                const flat = storeTopLevelDATA.current;
+                for (let i = 1; i < tokens.length; i++) {
+                    const ckey = joinPathFunc(tokens, i);
+                    if (!flat.has(ckey))
+                        continue;
+                    const val = flat.get(ckey);
+                    if (typeof val === 'string' && isPreservedFunc(val)) {
+                        const preData = preserveDATA.current.get(val);
+                        const rpath = joinPathFunc(tokens.slice(i));
+                        const jget = getFromPathFunc(preData, rpath);
+                        if (jget === undefined)
+                            throw new Error(`No data found at "${rpath}" (${val})!`);
+                        res.data = jget;
+                        return res;
                     }
-
-                /* return preserved pandata */
-                if (preVal.length > 0) {
-                    const preData = preserveDATA.current[preVal];
-                    const jget = json.get(preData, rpath);
-                    if (!jget)
-                        throw new Error(`No data found at "${rpath}" (${preVal})!`);
-                    res.data = jget;
-                    return res;
+                    break;
                 }
-
-                /* If no pandata found */
-                else
-                    throw new Error(`No data found at "${path}"!`);
+                throw new Error(`No data found at "${path}"!`);
             }
 
-            /* If pandata found */
-            const tab = filter.sort((a, b) => a.localeCompare(b));
-            const obj: JSON_DEFAULT_TYPE = {};
-            for (let t = 0; t < tab.length; t++) {
-                const targ = tab[t];
-                obj[targ] = storeTopLevelDATA.current[targ];
-            }
-
-            /* Set preserved data */
-            for (let k in obj) {
-                const val = obj[k];
-                if (typeof val !== 'string')
-                    continue;
-                const isPreserved = val.indexOf('$pre_') === 0;
-                if (isPreserved)
-                    obj[k] = preserveDATA.current[val];
-            }
-
-            /* Build JSON Object from paths */
-            const reversed = reverseTopLevelJsonFunc({ data: obj });
-            if (!reversed.ok)
-                throw new Error(reversed.log);
-
-            /* Get pandata */
-            let pandata: any = reversed.data;
-            const pathTab = path.split('.');
-            for (let d = 0; d < pathTab.length; d++) {
-                const typ = getRealTypeFunc(pandata).type;
-                const kdx = pathTab[d];
-                switch (typ) {
-                    case 'json': { pandata = pandata[kdx] } break;
-
-                    case 'array': {
-                        const idxTab = kdx.replaceAll('[', '').replaceAll(']', '').split('_');
-                        for (let b = 0; b < idxTab.length; b++) {
-                            const idx = Number(idxTab[b]);
-                            pandata = pandata[idx];
-                        }
-                    } break;
-
-                    default: { };
-                };
-            }
-
-            /* - */
+            /* When path exists and data isn't preserved */
+            const pandata = cloneTreeFunc(getNodeFunc(storeDATA.current, tokens));
             res.data = pandata;
+
+            /* Cache read */
+            if (pandata !== undefined) cacheReadFunc(path, pandata);
         }
 
     } catch (e: any) {
@@ -1021,100 +1226,96 @@ const formatPathFunc = (x: { path: string, removeLastBracket?: true }): string =
     return path;
 };
 
-/** Decompose path */
-const decomposePathFunc = (x: { path: string }): string[] => {
-    const path = x.path;
-    let tab: string[] = [];
-
-    /* - */
-    const split = path.split('.');
-    for (let i = 0; i < split.length; i++) {
-        const target = split[i]; /* path */
-        const isIndexPattern = target.includes('[') && target.indexOf('[') === 0;
-
-        /* - */
-        if (isIndexPattern) {
-            const spt = target.split('_');
-            for (let k = 0; k < spt.length; k++) {
-                const index = spt[k];
-                const tlen = tab.length;
-                const latest = tlen > 0 ? tab[tlen - 1] : '';
-                const val = latest + (tlen > 0 ? (k === 0 ? '.' : '_') : '') + index;
-                tab.push(val);
-            }
-            continue; /* Jump to next target */
-        }
-
-        /* - */
-        const tlen = tab.length;
-        const latest = tlen > 0 ? tab[tlen - 1] : '';
-        const val = latest + (tlen > 0 ? '.' : '') + target;
-        tab.push(val);
-    }
-
-    /* Format paths */
-    for (let j = 0; j < tab.length; j++)
-        tab[j] = formatPathFunc({ path: tab[j], removeLastBracket: true });
-
-    /* - */
-    return tab;
-};
-
-/** Compare path •  */
-const comparePathFunc = (x: { path: string, sourceA: JSON_DEFAULT_TYPE, sourceB: JSON_DEFAULT_TYPE }): 'changed' | 'unchanged' | undefined => {
-    const path = formatPathFunc({ path: x.path });
-    const sourceA = x.sourceA;
-    const sourceB = x.sourceB;
-
-    /* Check types */
-    const sa = getRealTypeFunc(sourceA, ['json']); /* sourceA type */
-    const sb = getRealTypeFunc(sourceB, ['json']); /* sourceB type */
-
-    /* Check sources validity */
-    if (!sa.valid || !sb.valid) return undefined;
-
-    /* - */
-    const objA: JSON_DEFAULT_TYPE = {};
-    const objB: JSON_DEFAULT_TYPE = {};
-
-    const keysA = Object.keys(sourceA);
-    const keysB = Object.keys(sourceB);
-
-    const filterA = keysA.filter((e) => e.includes(path) && e.indexOf(path) === 0);
-    const filterB = keysB.filter((e) => e.includes(path) && e.indexOf(path) === 0);
-    if (filterA.length !== filterB.length) return 'changed'; /* Compare lengths */
-
-    /* - */
-    filterA.sort((a, b) => a.localeCompare(b));
-    filterB.sort((a, b) => a.localeCompare(b));
-    if (filterA.length > 0)
-        for (let i = 0; i < filterA.length; i++) {
-            const current = filterA[i];
-            objA[current] = sourceA[current];
-        }
-    if (filterB.length > 0)
-        for (let i = 0; i < filterB.length; i++) {
-            const current = filterB[i];
-            objB[current] = sourceB[current];
-        }
-
-    /* - */
-    for (let key in objA) {
-        const valueA = objA[key];
-        const valueB = objB[key];
-        if (valueA !== valueB) return 'changed';
-    }
-
-    /* - */
-    return 'unchanged';
-};
-
 /** Is preserved */
 const isPreservedFunc = (value: string) => typeof value === 'string' && value.includes('$pre_') && value.indexOf('$pre_') === 0;
 
+/** 
+* Make a write follow the "replace" semantics that a flat map can't express by itself: 
+* - an array is replaced as a whole (no stale tail), 
+* - writing a leaf (or deleting a path) clears everything that lived under it, 
+* - writing under a leaf/empty container clears that leaf/container, 
+* - an array and an object can't live at the same place: writing one clears the other, 
+* - an empty "{}" never wipes an existing object. 
+* Every stale path is turned into an "undefined" write, so the regular diff/watcher flow handles it. 
+* It only walks the part of the nested store the write lands in (never the whole store). 
+*/
+const reconcilePandataFunc = (x: { pandata: JSON_DEFAULT_TYPE, arrays: string[], replace?: string[] }): void => {
+    const pandata = x.pandata;
+    const flat = storeTopLevelDATA.current;
+    const tree = storeDATA.current;
+    const stale: string[] = [];
+    const replaceKeys = new Set(x.replace ?? []);
+
+    /* Arrays (and values replaced by an update function) are replaced as a whole */
+    const roots = [...x.arrays, ...(x.replace ?? [])];
+    const rootSet = new Set<string>();
+    for (let a = 0; a < roots.length; a++) {
+        const tokens = tokenizePathFunc(resolvePathFunc({ path: roots[a] }));
+        rootSet.add(joinPathFunc(tokens));
+        const node = getNodeFunc(tree, tokens);
+        if (node !== undefined) collectLeafKeysFunc(node, tokens.slice(), stale);
+    }
+    const underRoot = (tokens: PATH_TOKEN[]): boolean => { /* Inside something that is replaced as a whole */
+        for (let end = 1; end < tokens.length; end++) if (rootSet.has(joinPathFunc(tokens, end))) return true;
+        return false;
+    };
+
+    /* - */
+    const keys = Object.keys(pandata);
+    for (let i = 0; i < keys.length; i++) {
+        const k = keys[i];
+        const v = pandata[k];
+        if (typeof v === 'function') continue; /* Update functions are already resolved at this point */
+        const tokens = tokenizePathFunc(k);
+        const node = getNodeFunc(tree, tokens);
+
+        /* "{}" over an existing object: nothing to write */
+        if (
+            v !== undefined && !Array.isArray(v) && isEmptyContainerFunc(v) && !replaceKeys.has(k) &&
+            !underRoot(tokens) && node instanceof Map && node.size > 0
+        ) {
+            delete pandata[k];
+            continue;
+        }
+
+        /* Whatever lived under this path is gone */
+        if (isContainerFunc(node)) collectLeafKeysFunc(node, tokens.slice(), stale);
+        if (v === undefined) continue;
+
+        /* A leaf (or empty container) above this path is gone, and an array can't live next to an object */
+        let cur: any = tree;
+        for (let n = 0; n < tokens.length; n++) {
+            const tok = tokens[n];
+            if (Array.isArray(cur) !== (typeof tok === 'number')) { /* Wrong kind of container for this key/index */
+                collectLeafKeysFunc(cur, tokens.slice(0, n), stale);
+                break;
+            }
+            if (!hasChildFunc(cur, tok)) break; /* Nothing below: no conflict */
+            if (n === tokens.length - 1) break;
+            const child = childOfFunc(cur, tok);
+            if (!isContainerFunc(child)) { /* A leaf above this path */
+                const key = joinPathFunc(tokens, n + 1);
+                if (flat.has(key)) stale.push(key);
+                break;
+            }
+            const ckey = joinPathFunc(tokens, n + 1);
+            if (flat.has(ckey)) { /* A container that has its own key is an empty one: it is above this path */
+                stale.push(ckey);
+                break;
+            }
+            cur = child;
+        }
+    }
+
+    /* - */
+    for (let d = 0; d < stale.length; d++)
+        if (!hasPropertyFunc(pandata, stale[d])) pandata[stale[d]] = undefined;
+};
+
 /** Update store */
-const updateStoreDataFunc = (x: { pandata: JSON_DEFAULT_TYPE }): FUNCTION_DEFAULT_RETURN_TYPE => {
+const updateStoreDataFunc = (x: { pandata: JSON_DEFAULT_TYPE, arrays?: string[] }): FUNCTION_DEFAULT_RETURN_TYPE => {
     let res: FUNCTION_DEFAULT_RETURN_TYPE = { ok: true, log: '', data: undefined };
+    let rollback: (() => void) | undefined; /* Puts the store back as it was if the update fails halfway */
     try {
         const pandata: JSON_DEFAULT_TYPE = {};
 
@@ -1124,142 +1325,175 @@ const updateStoreDataFunc = (x: { pandata: JSON_DEFAULT_TYPE }): FUNCTION_DEFAUL
             pandata[rpaf] = x.pandata[k];
         }
 
-        /* - */
-        const paths: string[] = Object.keys(storeTopLevelDATA.current).sort((a, b) => a.localeCompare(b));
-        const topLevelDataclone = { ...storeTopLevelDATA.current };
-        const watchedPaths = Object.keys(watcherDATA.current);
+        /* Both stores are edited in place, and only where the write lands */
+        const flat = storeTopLevelDATA.current;
+        const tree = storeDATA.current;
+
+        /* Run "update" functions: they all see the store as it was before this write */
+        const arrays: string[] = [...(x.arrays ?? [])];
+        const replace: string[] = []; /* Paths whose whole value is replaced by an object/array an update function returned */
+        const preKeys = Object.keys(pandata);
+        for (let p = 0; p < preKeys.length; p++) {
+            const path = preKeys[p];
+            const val = pandata[path];
+            if (typeof val !== 'function') continue;
+
+            /* Check if the update function is sync */
+            const isSync = getFunctionTypeFunc(val) === 'sync';
+            if (!isSync)
+                throw new Error(`You try to update the value at "${path}" with an async function!`);
+
+            /* Set update result to "newVal" */
+            let current = flat.get(path);
+            if (current && isPreservedFunc(current))
+                current = preserveDATA.current.get(current);
+            const func = val as Function;
+            const result = func(current);
+            if (result && typeof result.then === 'function')
+                throw new Error(`You try to update the value at "${path}" with an async function!`);
+
+            /* An object/array replaces the whole value at this path, anything else is a plain leaf */
+            if (result !== null && typeof result === 'object') {
+                delete pandata[path];
+                const flattened = topLevelJsonFunc({ data: { [path]: result }, arrays });
+                if (!flattened.ok)
+                    throw new Error(flattened.log);
+                Object.assign(pandata, flattened.data);
+                replace.push(path);
+            } else pandata[path] = result;
+        }
+
+        /* Turn "replace" semantics (arrays, subtree deletion...) into explicit deletions */
+        reconcilePandataFunc({ pandata, arrays, replace });
+
+        /* Find what really changes (a no-op delete, or the same value, changes nothing) */
+        const candidates: string[] = []; /* The changes that were asked for and look different from what is stored */
+        const toDelete: string[] = [];
+        const toSet: string[] = [];
+        const pKeys = Object.keys(pandata);
+        for (let i = 0; i < pKeys.length; i++) {
+            const k = pKeys[i];
+            const nv = pandata[k];
+            const has = flat.has(k);
+            if (nv === undefined) {
+                if (has) {
+                    candidates.push(k);
+                    toDelete.push(k);
+                }
+                continue;
+            }
+            if (has && sameValueFunc(nv, flat.get(k))) continue;
+            candidates.push(k);
+            toSet.push(k);
+        }
 
         /* - */
         const newPandata: JSON_STRING_TYPE = {};
         const updatedPandata: JSON_STRING_TYPE = {};
         const deletedPandata: JSON_STRING_TYPE = {};
 
+        /* 
+        * What each change affects: its own path and all of its ancestors, as they are before anything is touched. 
+        * (Only the paths of the changes are looked at, never the whole store.) 
+        */
+        type AFFECTED = { path: string, tokens: PATH_TOKEN[], existed: boolean, watched: boolean, wasLeaf: boolean };
+        const affectedByKey = new Map<string, AFFECTED[]>();
+        for (let c = 0; c < candidates.length; c++) {
+            const tokens = tokenizePathFunc(candidates[c]);
+            const list: AFFECTED[] = [];
+            for (let end = 1; end <= tokens.length; end++) {
+                const path = formatPathFunc({ path: joinPathFunc(tokens, end), removeLastBracket: true });
+                list.push({
+                    path, tokens: tokens.slice(0, end),
+                    existed: existsAtFunc(tokens, end),
+                    watched: watcherDATA.current.has(path),
+                    wasLeaf: flat.has(path)
+                });
+            }
+            affectedByKey.set(candidates[c], list);
+        }
+
+        /* Update both stores. Deletions go first, so that a leaf can turn into a container (and the reverse) */
+        const undo: { key: string, had: boolean, old: any }[] = [];
+        const ctx: EDIT_CTX = {
+            touchKey: (key) => undo.push({ key, had: flat.has(key), old: flat.get(key) }),
+            containers: new Map()
+        };
+
+        /* Delete "undefined" values, Set others */
+        const put = (key: string, value: any, c: EDIT_CTX): void => {
+            const tokens = tokenizePathFunc(key);
+            if (value === undefined) {
+                if (flat.has(key)) c.touchKey(key);
+                flat.delete(key);
+                deleteFromTreeFunc(tree, tokens, c);
+            } else {
+                c.touchKey(key);
+                flat.set(key, value);
+                setInTreeFunc(tree, tokens, copyLeafFunc(value), c);
+            }
+        };
+
+        /* Undo changes if something went wrong */
+        rollback = () => {
+            const back: EDIT_CTX = { touchKey: () => { }, containers: new Map() };
+            for (let u = undo.length - 1; u >= 0; u--) {
+                try { put(undo[u].key, undo[u].had ? undo[u].old : undefined, back) }
+                catch (e: any) { logFunc('Err :: rollback =>', e.message) }
+            }
+            try { normalizeTreeFunc(back) }
+            catch (e: any) { logFunc('Err :: rollback =>', e.message) }
+        };
+
         /* - */
-        const watchedPaf: JSON_DEFAULT_TYPE = {};
-        const postProcess: JSON_DEFAULT_TYPE = {};
+        for (let i = 0; i < toDelete.length; i++)
+            put(toDelete[i], undefined, ctx);
+        normalizeTreeFunc(ctx); /* Remove what the deletions left empty, so that the new values find a clean place */
+        ctx.containers.clear();
+        for (let i = 0; i < toSet.length; i++)
+            put(toSet[i], pandata[toSet[i]], ctx);
+        normalizeTreeFunc(ctx);
+
+        /* What really changed: every touched key, compared with how it was (a deleted array item that stays a "null" is unchanged) */
+        const original = new Map<string, { had: boolean, old: any }>();
+        for (let u = 0; u < undo.length; u++)
+            if (!original.has(undo[u].key)) original.set(undo[u].key, undo[u]);
+        const changedKeys: string[] = []; /* Also used to invalidate memoized reads */
+        original.forEach((orig, key) => {
+            const has = flat.has(key);
+            if (orig.had !== has || (has && !sameValueFunc(flat.get(key), orig.old)))
+                changedKeys.push(key);
+        });
 
         /* True as soon as at least one path really changes */
-        let mutated = false;
-
-        /* Process each path */
-        const pandataPaths = Object.keys(pandata).sort((a, b) => a.localeCompare(b));
-        for (let p = 0; p < pandataPaths.length; p++) {
-            const path = pandataPaths[p];
-            const val = pandata[path]; /* Current path's value */
-
-            /* Run "update" functions */
-            let newVal: any = val;
-            if (typeof val === 'function') {
-                /* Check if the update function is sync */
-                const isSync = getFunctionTypeFunc(val) === 'sync';
-                if (!isSync)
-                    throw new Error(`You try to update the value at "${path}" with an async function!`);
-                /* Set update result to "newVal" */
-                let current = storeTopLevelDATA.current[path];
-                if (current && isPreservedFunc(current))
-                    current = preserveDATA.current[current];
-                const func = val as Function;
-                const result = func(current);
-                newVal = result;
-            }
-
-            /* Skip unchanged values */
-            const unchanged = comparePathFunc({
-                path: path,
-                sourceA: pandata,
-                sourceB: storeTopLevelDATA.current
-            }) === 'unchanged';
-            if (unchanged) continue;
-            mutated = true;
-
-            /* Process current path and collect all path affected by current path's modifications */
-            const formatedPath = formatPathFunc({ path: path, removeLastBracket: true });
-            const decomp = decomposePathFunc({ path: formatedPath });
-            for (let i = 0; i < decomp.length; i++) {
-                const targ = decomp[i]; /* Current path */
-                const filter = paths.filter((e: string) => e.includes(targ) && e.indexOf(targ) === 0);
-                const exists = filter.length > 0; /* If current path already exists */
-                if (exists) {
-                    /* collect all path, affected by current path's modifications */
-                    const affPathCollector: JSON_STRING_TYPE = {};
-                    for (let f = 0; f < filter.length; f++) {
-                        const cpath = filter[f];
-                        const dec = decomposePathFunc({ path: cpath });
-                        for (let c = 0; c < dec.length; c++) {
-                            const cpaf = dec[c];
-                            affPathCollector[cpaf] = cpaf;
-                        }
-                    }
-
-                    /* Collect watched and post-processible paths, affected by current path's modifications */
-                    const arr = Object.keys(affPathCollector);
-                    for (let d = 0; d < arr.length; d++) {
-                        const current = arr[d];
-                        if (!hasPropertyFunc(storeTopLevelDATA.current, current) && watchedPaths.includes(current))
-                            watchedPaf[current] = current;
-                        else
-                            postProcess[current] = storeTopLevelDATA.current[current];
-                    }
-                }
-                else newPandata[targ] = targ;
-            }
-
-            /* Update pandata */
-            pandata[path] = newVal;
-        }
-
-        /* Update store */
-        const newObj = Object.assign(storeTopLevelDATA.current, pandata);
-        const reversedData = reverseTopLevelJsonFunc({ data: newObj }); /* Reverse JSON object */
-        if (!reversedData.ok)
-            throw new Error(reversedData.log);
-        storeDATA.current = reversedData.data; /* Update "storeDATA" */
-
-        /* Update "storeTopLevelDATA" */
-        cacheStoreTopLevelDataFunc();
-
-        /* Remove undefined pandata */
-        for (let p in storeTopLevelDATA.current) {
-            const current = storeTopLevelDATA.current[p];
-            if (current === undefined)
-                delete storeTopLevelDATA.current[p];
-        }
+        const mutated = changedKeys.length > 0;
 
         /* Tell the hooks that the store has changed */
-        if (mutated) storeVersion.current++;
-
-        /* Post processing */
-        for (let k in postProcess) {
-            if (hasPropertyFunc(storeTopLevelDATA.current, k)) {
-                const oldVal = postProcess[k];
-                const currentVal = storeTopLevelDATA.current[k];
-                if (oldVal !== currentVal)
-                    updatedPandata[k] = k;
-
-            } else deletedPandata[k] = k;
+        if (mutated) {
+            storeVersion.current++;
+            invalidateReadCacheFunc(changedKeys);
         }
 
-        /* Process watched paths */
-        for (let k in watchedPaf) {
-            const sourceA = topLevelDataclone;
-            const sourceB = storeTopLevelDATA.current;
-
-            /* Detect changes */
-            const changed = comparePathFunc({ path: k, sourceA, sourceB }) === 'changed';
-            if (!changed) continue;
-
-            /* - */
-            const keysA = Object.keys(sourceA);
-            const keysB = Object.keys(sourceB);
-
-            const filterA = keysA.filter((e) => e.includes(k) && e.indexOf(k) === 0);
-            const filterB = keysB.filter((e) => e.includes(k) && e.indexOf(k) === 0);
-
-            const updated = filterA.length > 0 && filterB.length > 0;
-            if (updated)
-                updatedPandata[k] = k;
-            else
-                deletedPandata[k] = k;
+        /* 
+        * Paths that didn't exist are "set". Watched paths that did exist are "updated" if they are still there, "deleted" if not 
+        * (a value that became a container counts as gone). 
+        */
+        const seen: JSON_DEFAULT_TYPE = {};
+        for (let c = 0; c < changedKeys.length; c++) {
+            const list = affectedByKey.get(changedKeys[c]);
+            if (!list) continue; /* Not a change that was asked for (e.g. a gap filled with "null") */
+            for (let i = 0; i < list.length; i++) {
+                const a = list[i];
+                if (hasPropertyFunc(seen, a.path)) continue;
+                seen[a.path] = true;
+                if (!a.existed) { newPandata[a.path] = a.path; continue; }
+                if (!a.watched) continue;
+                const stillThere = a.wasLeaf
+                    ? flat.has(a.path)
+                    : existsAtFunc(a.tokens, a.tokens.length);
+                if (stillThere) updatedPandata[a.path] = a.path;
+                else deletedPandata[a.path] = a.path;
+            }
         }
 
         /* Trigger updates within the same instance context; this work is deferred beyond the store() call. */
@@ -1279,10 +1513,17 @@ const updateStoreDataFunc = (x: { pandata: JSON_DEFAULT_TYPE }): FUNCTION_DEFAUL
 
             /* Global listeners */
             if (mutated)
-                storeListeners.current.forEach((listener) => { try { listener() } catch (e: any) { } });
+                storeListeners.current.forEach((listener) => {
+                    try { listener() }
+                    catch (e: any) { logFunc('Err :: listener =>', e) }
+                });
         }));
 
-    } catch (e: any) { res.ok = false; res.log = e.message }
+    } catch (e: any) {
+        rollback?.();
+        res.ok = false;
+        res.log = e.message;
+    }
     return res;
 };
 
@@ -1299,14 +1540,15 @@ const createWatcherFunc = <T extends WATCHER_SOURCE_TYPE>(x: CREATE_WATCHER_ARG_
         if (isAsync) return;
 
         /* Init watcher's path */
-        if (!hasPropertyFunc(watcherDATA.current, path))
-            watcherDATA.current[path] = { get: {}, watch: { set: {}, update: {}, delete: {} } };
+        if (!watcherDATA.current.has(path))
+            watcherDATA.current.set(path, { get: {}, watch: { set: {}, update: {}, delete: {} } });
+        const entry = watcherDATA.current.get(path)!;
 
         /* Set callback */
         if (source === 'get')
-            watcherDATA.current[path].get[watcherId] = { key: null, callback };
+            entry.get[watcherId] = { key: null, callback };
         else
-            watcherDATA.current[path].watch[x.type][watcherId] = { key: x.key, callback };
+            entry.watch[x.type][watcherId] = { key: x.key, callback };
 
     } catch (e: any) { logFunc('Err :: createWatcherFunc() =>', e.message) }
 };
@@ -1316,8 +1558,7 @@ const removeWatcherFunc = (x: { watcherId: string | string[] }) => {
     const wid = Array.isArray(x.watcherId) ? x.watcherId : [x.watcherId];
     for (let i = 0; i < wid.length; i++) {
         const id = wid[i];
-        for (let k in watcherDATA.current) {
-            const wdata = watcherDATA.current[k];
+        watcherDATA.current.forEach((wdata, k) => { /* Deleting the current entry while walking a Map is safe */
             delete wdata.get[id];
             delete wdata.watch.set[id];
             delete wdata.watch.update[id];
@@ -1328,19 +1569,21 @@ const removeWatcherFunc = (x: { watcherId: string | string[] }) => {
                 Object.keys(wdata.watch.set).length === 0 &&
                 Object.keys(wdata.watch.update).length === 0 &&
                 Object.keys(wdata.watch.delete).length === 0;
-            if (empty) delete watcherDATA.current[k];
-        }
+            if (empty) watcherDATA.current.delete(k);
+        });
     }
 };
 
 /** Run watcher function */
-const runWatcherFunctionFunc = (x: { path: string, key: string | null, callback: Function }) => {
+const runWatcherFunctionFunc = (x: { path: string, key: string | null, isDeletion: boolean, callback: Function }) => {
     try {
         const key = x.key;
-        const pandata = extractPandataFromPathFunc({ path: x.path });
-        x.callback(key, pandata.data ?? undefined);
+        const pandata = x.isDeletion ? undefined : extractPandataFromPathFunc({ path: x.path });
+        const result = x.callback(key, pandata?.ok ? pandata.data : undefined); /* "null" stays "null" */
+        if (result && typeof result.then === 'function')
+            logFunc('Warn :: async watcher callbacks are not supported, the returned promise is ignored.');
 
-    } catch (e: any) { logFunc('Err :: runWatcherFunctionFunc() =>', e.message) }
+    } catch (e: any) { logFunc('Err :: watcher callback =>', e) }
 };
 
 /** Trigger update */
@@ -1352,25 +1595,27 @@ const triggerUpdateFunc = (x: TRIGGER_UPDATE_ARG_TYPE): void => {
 
         for (let i = 0; i < path.length; i++) {
             const targ = formatPathFunc({ path: path[i], removeLastBracket: true }); /* Current path */
-            const exists = watcherDATA.current[targ];
-            if (!exists) continue;
+            const entry = watcherDATA.current.get(targ);
+            if (!entry) continue;
 
             /* - */
-            const getwatchers = watcherDATA.current[targ].get;
+            const getwatchers = entry.get;
             const getFuncs = Object.values(getwatchers);
             for (let k = 0; k < getFuncs.length; k++)
                 delayFunc().then(() => withPandaStoreState(state, () => {
-                    try { getFuncs[k].callback() } catch (e: any) { }
+                    try { getFuncs[k].callback() }
+                    catch (e: any) { logFunc('Err :: hook callback =>', e) }
                 }));
 
             /* - */
-            const watchWatchers = watcherDATA.current[targ].watch[typ];
+            const watchWatchers = entry.watch[typ];
             const watchFuncs = Object.values(watchWatchers);
             for (let k = 0; k < watchFuncs.length; k++)
                 delayFunc().then(() => withPandaStoreState(state, () => {
                     runWatcherFunctionFunc({
                         path: targ,
                         key: watchFuncs[k].key,
+                        isDeletion: typ === 'delete',
                         callback: watchFuncs[k].callback
                     })
                 }));
@@ -1379,104 +1624,18 @@ const triggerUpdateFunc = (x: TRIGGER_UPDATE_ARG_TYPE): void => {
     } catch (e: any) { logFunc('Err :: triggerUpdateFunc() =>', e.message) };
 };
 
-/** Build array from index pattern */
-const buildArrayFromIndexPatternFunc = (x: { patchChain: any[], pathIndex: number }): any[] => {
-    const patchChain = x.patchChain;
-    const pathIndex = x.pathIndex;
-
-    /* 0. Collect indexes and get array's max depth */
-    let indexCollector: JSON_DEFAULT_TYPE = {};
-    let maxDepth: number = 0;
-    for (let l = 0; l < patchChain.length; l++) {
-        /* Collect indexes */
-        const spt = patchChain[l].split('.');
-        const targ = spt[pathIndex].replaceAll('[', '').replaceAll(']', '');
-        indexCollector[targ] = targ;
-
-        /* Get array's max depth */
-        const arr: any[] = targ.split('_');
-        const alen = arr.length - 1;
-        if (alen > maxDepth) maxDepth = alen;
-    }
-
-    /* 1. Create the top-level array "tab" */
-    let tab: any[] = [];
-    const lengthsTab = Object.keys(indexCollector).sort((a, b) => a.localeCompare(b));
-    let l = 0;
-    for (let t = 0; t < lengthsTab.length; t++) {
-        const n = Number(lengthsTab[t].split('_')[0]);
-        if (n > l) l = n;
-    }
-    tab = Array(l + 1).fill(undefined).map(() => null);
-
-    /* 2. Create nested arrays */
-    const hasNestedArr = maxDepth > 0;
-    if (hasNestedArr)
-        for (let h = 1; h <= maxDepth; h++) {
-            const deepLevel = h;
-            const len = deepLevel + 1;
-            let filta = lengthsTab.filter((e) => e.split('_').length >= len);
-
-            /* Limit deph to current "len", for each entry of "filter" */
-            const newFilter: JSON_DEFAULT_TYPE = {};
-            for (let s = 0; s < filta.length; s++) {
-                const entry = filta[s];
-                const split = entry.split('_');
-                let val = entry;
-                if (split.length > len) {
-                    const arr = split.slice(0, len);
-                    val = arr.join('_');
-                };
-                newFilter[val] = val;
-            }
-            filta = Object.keys(newFilter).sort((a, b) => a.localeCompare(b));
-
-            /* Extract prefixes */
-            const prefixes: JSON_DEFAULT_TYPE = {};
-            for (let p = 0; p < filta.length; p++) {
-                const arr = filta[p].split('_');
-                let pfx = '';
-                for (let f = 0; f < deepLevel; f++)
-                    pfx = pfx + (pfx.length > 0 ? '_' : '') + arr[f];
-                prefixes[pfx] = pfx;
-            }
-
-            /* Process each prefix */
-            for (let key in prefixes) {
-                const prefix = prefixes[key]; /* current prefix */
-
-                /* Get nested array length */
-                const indexCombinaison = filta.filter((e) => e.indexOf(prefix) === 0).sort((a, b) => a.localeCompare(b)); /* Extract all index combinaison, belonging to the current prefix */
-                const joinedNestedIndex = indexCombinaison.join('_').replaceAll(`${prefix}_`, '');
-                const nestedLength = Number(joinedNestedIndex.split('_').reverse()[0]) + 1;
-
-                /* Create nested arrays */
-                const splt = prefix.split('_');
-                let tabRef: any[] = tab;
-                for (let s = 0; s < splt.length; s++) {
-                    const currentIndex = Number(splt[s]);
-                    const isLastLoop = s === splt.length - 1;
-                    if (!isLastLoop) tabRef = tabRef[currentIndex];
-                    else tabRef[currentIndex] = Array(nestedLength).fill(undefined).map(() => null);
-                }
-            }
-        }
-
-    /* - */
-    return tab;
-};
-
 /** Inspect shortcuts */
 const inspectShortcutsFunc = (): JSON_DEFAULT_TYPE => {
-    let res: JSON_DEFAULT_TYPE = {};
-    const keys = Object.keys(shortcutsDATA.current);
-    if (keys.length === 0) return res;
-    for (let k in shortcutsDATA.current) {
-        try { res[k] = resolvePathFunc({ path: k }) }
-        catch (e: any) { res[k] = undefined }
+    const res: SHORTCUTS_DATA_TYPE = new Map();
+    const keys = Array.from(shortcutsDATA.current.keys());
+    if (keys.length === 0) return {};
+    for (let i = 0; i < keys.length; i++) {
+        const k = keys[i];
+        try { res.set(k, resolvePathFunc({ path: k })) }
+        catch (e: any) { res.set(k, undefined) }
     }
     shortcutsDATA.current = res;
-    return res;
+    return Object.fromEntries(res); /* A plain object for the outside world: the internal Map is never handed out */
 };
 
 /** String (keys) Interpolation */
@@ -1505,10 +1664,8 @@ const interpolateFunc = (x: { json: JSON_DEFAULT_TYPE, deps: string[] }) => {
                 const convert = parseInt(targ);
                 const isNumber = !isNaN(convert);
                 if (!isNumber) {
-                    if (targ !== '%' && interopString.length > 0) {
-                        /* - */
-                        if (blockList.includes(interopString)) continue;
-
+                    /* A placeholder is "%" followed by at least one digit */
+                    if (interopString.length > 1 && !blockList.includes(interopString)) {
                         /* Get the corresponding dependencie's value */
                         const nb = Number(interopString.replace('%', ''));
                         const depVal = deps[nb];
@@ -1517,12 +1674,9 @@ const interpolateFunc = (x: { json: JSON_DEFAULT_TYPE, deps: string[] }) => {
 
                         /* Store the interpolatable key and its corresponding dep's value */
                         interopCollector[interopString] = depVal;
-
-                        /* - */
                         blockList.push(interopString);
-                        interopString = '';
-
-                    } else if (targ === '%') interopString = interopString + targ;
+                    }
+                    interopString = targ === '%' ? '%' : ''; /* "%0%1" holds two placeholders */
 
                 } else {
                     if (interopString.length === 0)
@@ -1539,8 +1693,10 @@ const interpolateFunc = (x: { json: JSON_DEFAULT_TYPE, deps: string[] }) => {
         for (let key in jsonData) {
             const val = jsonData[key];
             let newKey: string = key;
-            for (let interop in interopCollector)
-                if (newKey.includes(interop)) newKey = newKey.replaceAll(interop, interopCollector[interop]);
+            /* Longest placeholders first, so that "%10" isn't eaten by "%1" */
+            const interops = Object.keys(interopCollector).sort((a, b) => b.length - a.length);
+            for (let n = 0; n < interops.length; n++)
+                if (newKey.includes(interops[n])) newKey = newKey.replaceAll(interops[n], interopCollector[interops[n]]);
             newObj[newKey] = val;
         }
     else newObj = jsonData;
@@ -1560,14 +1716,33 @@ const interpolateFunc = (x: { json: JSON_DEFAULT_TYPE, deps: string[] }) => {
 
 /** 
 * Transform the JSON Object into top-level keys only 
-* Don't specify a value for "arr", it's used for recursive ops only 
+* Don't specify a value for "arr", it's used for recursive operations only 
 */
-const topLevelJsonFunc = (x: { data: JSON_DEFAULT_TYPE, arr?: string[] }): FUNCTION_DEFAULT_RETURN_TYPE => {
+const topLevelJsonFunc = (x: { data: JSON_DEFAULT_TYPE, arr?: string[], arrays?: string[] }): FUNCTION_DEFAULT_RETURN_TYPE => {
     let res: FUNCTION_DEFAULT_RETURN_TYPE = { ok: true, log: '', data: undefined };
     try {
         const data = x.data;
         let collector: JSON_DEFAULT_TYPE = {};
         const dtyp = getRealTypeFunc(data).type;
+
+        /* 
+        * Check if data is plain plain JSON object
+        * Only plain JSON objects are supported 
+        */
+        assertPlainObjectFunc(data);
+
+        /* Path of the current container (undefined for the root) */
+        const selfPath = (x.arr && x.arr.length > 0)
+            ? formatPathFunc({ path: x.arr.join('.') })
+            : undefined;
+
+        /* Collect the paths of arrays (an array is replaced as a whole, see "reconcilePandataFunc") */
+        if (dtyp === 'array' && selfPath !== undefined && x.arrays)
+            x.arrays.push(selfPath);
+
+        /* An empty array/object has no leaf: keep it as-is, otherwise it would be lost */
+        if (selfPath !== undefined && isEmptyContainerFunc(data))
+            collector[selfPath] = dtyp === 'array' ? [] : {};
 
         /* - */
         if (dtyp === 'json')
@@ -1580,35 +1755,12 @@ const topLevelJsonFunc = (x: { data: JSON_DEFAULT_TYPE, arr?: string[] }): FUNCT
 
                 /* - */
                 switch (typ) {
-                    case 'json': {
-                        const recurse = topLevelJsonFunc({ data: val, arr: tab });
+                    case 'json': /* Execute the same code as "array" case */
+                    case 'array': {
+                        const recurse = topLevelJsonFunc({ data: val, arr: tab, arrays: x.arrays });
                         if (!recurse.ok)
                             throw new Error(recurse.log);
                         Object.assign(collector, recurse.data);
-                    } break;
-
-                    case 'array': {
-                        for (let i = 0; i < val.length; i++) {
-                            const entry = val[i];
-                            const getType = getRealTypeFunc(entry);
-
-                            const etyp = getType.type;
-                            if (!getType.valid)
-                                throw Error(`Invalid type ("${etyp}") found!`);
-                            const idx = `[${i}]`;
-
-                            /* - */
-                            if (['json', 'array'].includes(etyp)) {
-                                const recurse = topLevelJsonFunc({ data: entry, arr: [...tab, idx] });
-                                if (!recurse.ok)
-                                    throw new Error(recurse.log);
-                                Object.assign(collector, recurse.data);
-
-                            } else {
-                                const ky = formatPathFunc({ path: [...tab, idx].join('.') });
-                                collector[ky] = val[i];
-                            }
-                        }
                     } break;
 
                     default: {
@@ -1631,7 +1783,7 @@ const topLevelJsonFunc = (x: { data: JSON_DEFAULT_TYPE, arr?: string[] }): FUNCT
 
                 /* - */
                 if (['json', 'array'].includes(etyp)) {
-                    const recurse = topLevelJsonFunc({ data: entry, arr: [...tab, idx] });
+                    const recurse = topLevelJsonFunc({ data: entry, arr: [...tab, idx], arrays: x.arrays });
                     if (!recurse.ok)
                         throw new Error(recurse.log);
                     Object.assign(collector, recurse.data);
@@ -1647,154 +1799,9 @@ const topLevelJsonFunc = (x: { data: JSON_DEFAULT_TYPE, arr?: string[] }): FUNCT
         res.data = collector;
 
     } catch (e: any) {
-        res.ok = false; res.log = e.message;
+        res.ok = false;
+        res.log = e.message;
         logFunc(`Err :: topLevelJsonFunc() => ${e.message}`);
-    }
-    return res;
-};
-
-/** Reverse "topLevelJsonFunc" */
-const reverseTopLevelJsonFunc = (x: { data: JSON_DEFAULT_TYPE }): FUNCTION_DEFAULT_RETURN_TYPE => {
-    let res: FUNCTION_DEFAULT_RETURN_TYPE = { ok: true, log: '', data: undefined };
-    try {
-        logFunc('\n\n');
-        /* 
-        * Purge 
-        * When a path with a value of type array or json is overwritted, then clear any other depending paths in order to apply the update safely
-        */
-        const jsonData = x.data;
-        const array = Object.keys(jsonData);
-        const flt = array.filter((e) => ['array', 'json'].includes(getRealTypeFunc(jsonData[e]).type));
-        for (let i = 0; i < flt.length; i++) {
-            const paf = flt[i];
-            const todelete = array.filter((e) =>
-                e.includes(paf) &&
-                e.indexOf(paf) === 0 &&
-                e.length > paf.length
-            );
-            if (todelete.length > 0)
-                for (let t = 0; t < todelete.length; t++) {
-                    const k = todelete[t];
-                    delete jsonData[k];
-                }
-        }
-
-        /* - */
-        const data = jsonData;
-        const allKeys = Object.keys(data).sort((a, b) => a.localeCompare(b));
-        const collector: JSON_DEFAULT_TYPE = {};
-
-        /* Extract first column keys */
-        const firstColumnKeys: JSON_DEFAULT_TYPE = {};
-        for (let k in data) {
-            const firstColumnKeyName = k.split('.')[0];
-            firstColumnKeys[firstColumnKeyName] = firstColumnKeyName;
-        }
-
-        /* For each top-level key, extract all keys containing it */
-        const topLevelKeys: { [keys: string]: string[] } = {};
-        const tab = Object.keys(firstColumnKeys);
-        for (let i = 0; i < tab.length; i++) {
-            /* Extract keys */
-            const target = tab[i];
-            let keysTab = allKeys.filter((e) => e.includes(target) && e.indexOf(target) === 0);
-            const kjoin = keysTab.join('');
-            if (kjoin.includes('.'))
-                keysTab = keysTab.filter((e) => e.includes(target + '.') && e.indexOf(target + '.') === 0);
-            topLevelKeys[target] = keysTab;
-
-            /* Set 'top-level' keys inside the collector */
-            const firstEntry = keysTab[0] || undefined;
-            const path = !firstEntry ? undefined : firstEntry.split('.')[1] ?? undefined;
-            if (path) { /* Process top-level keys that are objects */
-                const topLevelKeyType = getPathTypeFunc(path);
-                collector[target] = (topLevelKeyType === 'json') ? {} : [];
-
-            } else { /* Process top-level keys that are not objects */
-                collector[target] = data[target];
-                delete topLevelKeys[target]; /* Remove the top-level key as its processing is finished */
-            }
-        }
-
-        /* Build array for top-level keys with a value of type array */
-        for (let k in collector) {
-            /* Skip non-array values */
-            if (getRealTypeFunc(collector[k]).type !== 'array')
-                continue;
-            /* Build array from index pattern */
-            const ktab = topLevelKeys[k];
-            const flt = ktab.filter((e) => e.includes(k) && e.indexOf(k) === 0);
-            collector[k] = buildArrayFromIndexPatternFunc({ patchChain: flt, pathIndex: 1 });
-        }
-
-        /* Get longest path length */
-        const lenObj: JSON_DEFAULT_TYPE = {};
-        let arr: number[] = [];
-        for (let n = 0; n < allKeys.length; n++) {
-            const ktab = allKeys[n].split('.');
-            lenObj[ktab.length] = ktab.length;
-        }
-        arr = Object.values(lenObj);
-        const longestPathLength = arr.sort((a, b) => b - a)[0];
-
-        /* Process the paths of each top-level key */
-        let processedPathChain: JSON_DEFAULT_TYPE = {};
-        for (let k in topLevelKeys) {
-            const keysTab = topLevelKeys[k];
-            let pathIndex = 1;
-            do {
-                for (let i = 0; i < keysTab.length; i++) {
-                    const ckey = keysTab[i]; /* current key */
-                    const pathTab = ckey.split('.');
-
-                    /* Get progressive pathChain */
-                    let pathChain = '';
-                    for (let p = 0; p <= pathIndex; p++)
-                        pathChain = pathChain + (pathChain.length > 0 ? '.' : '') + pathTab[p];
-
-                    /* Skip already processed path */
-                    if (hasPropertyFunc(processedPathChain, pathChain))
-                        continue;
-
-                    /* - */
-                    const filter = keysTab.filter((e) => e.includes(pathChain) && e.indexOf(pathChain) === 0);
-                    if (filter.length === 0)
-                        continue;
-                    filter.sort((a, b) => a.localeCompare(b));
-
-                    /* - */
-                    const split = filter[0].split('.');
-                    const nextPath = split[pathIndex + 1];
-
-                    const paf = split.join('.');
-                    const value = data[paf];
-
-                    if (nextPath)
-                        switch (getPathTypeFunc(nextPath)) {
-                            case 'json': { jsonAppendDataFunc({ sourceObj: collector, pathChain: paf, data: value }) } break;
-
-                            case 'array': { jsonAppendDataFunc({ sourceObj: collector, pathChain: paf, data: value, filter }); } break;
-
-                            default: { };
-                        }
-                    else jsonAppendDataFunc({ sourceObj: collector, pathChain: paf, data: value });
-
-                    /* Exclude current "pathChain" from next loops */
-                    processedPathChain[pathChain] = pathChain;
-                }
-
-                /* Increment */
-                pathIndex++;
-
-            } while (pathIndex < longestPathLength);
-        }
-
-        /* - */
-        res.data = collector;
-
-    } catch (e: any) {
-        res.ok = false; res.log = e.message;
-        logFunc(`Err :: reverseTopLevelJsonFunc() => ${e.message}`);
     }
     return res;
 };
@@ -1829,23 +1836,31 @@ const storeDataFunc = (...x: STORE_ARG_TYPE): FUNCTION_DEFAULT_RETURN_TYPE => {
             throw new Error(`Empty JSON object!`);
 
         /* TLV */
-        const tlv: JSON_DEFAULT_TYPE = topLevelJsonFunc({ data: jsonData });
+        const arrays: string[] = []; /* Paths of the arrays found in "jsonData" */
+        const tlv: JSON_DEFAULT_TYPE = topLevelJsonFunc({ data: jsonData, arrays });
         if (!tlv.ok)
             throw new Error(tlv.log);
         const data = tlv.data;
 
         /* Interpolation */
         let newObj = data;
-        if (deps.length > 0)
+        let arrayPaths = arrays;
+        if (deps.length > 0) {
             newObj = interpolateFunc({ json: data, deps });
+            const asKeys: JSON_DEFAULT_TYPE = {};
+            for (let a = 0; a < arrays.length; a++)
+                asKeys[arrays[a]] = a;
+            arrayPaths = Object.keys(interpolateFunc({ json: asKeys, deps }));
+        }
 
         /* Update "storeDATA" */
-        const updateStore = updateStoreDataFunc({ pandata: newObj });
+        const updateStore = updateStoreDataFunc({ pandata: newObj, arrays: arrayPaths });
         if (!updateStore.ok)
             throw new Error(updateStore.log);
 
     } catch (e: any) {
-        res.ok = false; res.log = e.message;
+        res.ok = false;
+        res.log = e.message;
         logFunc('Err :: storeDataFunc() =>', e.message);
     };
     return res;
@@ -1857,8 +1872,6 @@ const getDataAndPathsFunc = (path: '*' | GET_ARG_PATH_TYPE): { data: any, paths:
     const cachedPandata: JSON_DEFAULT_TYPE = {}; /* Fetched pandata cache */
     try {
         const dataType = getRealTypeFunc(path).type;
-
-        /* - */
         switch (dataType) {
             case 'string': {
                 const paf = resolvePathFunc({ path: path as string });
@@ -1913,12 +1926,17 @@ const getDataAndPathsFunc = (path: '*' | GET_ARG_PATH_TYPE): { data: any, paths:
         };
 
     } catch (e: any) {
-        res.ok = false; res.log = e.message;
+        res.ok = false;
+        res.log = e.message;
         logFunc('Err :: getDataFunc() =>', e.message);
     }
-    return { data: res.data, paths: Object.keys(cachedPandata) }; /* Each key of "cachedPandata" is a path */
-};
 
+    /* return */
+    return {
+        data: res.data,
+        paths: Object.keys(cachedPandata) /* Each key of "cachedPandata" is a path */
+    };
+};
 /** Get pandata */
 const getDataFunc = (path: '*' | GET_ARG_PATH_TYPE): any => getDataAndPathsFunc(path).data;
 
@@ -1954,7 +1972,6 @@ const watchDataFunc = (x: { path: WATCH_ARG_TYPE, watcherId: string, callbacks: 
                 for (let k in callbacks) {
                     const paths = path as JSON_STRING_TYPE;
                     const callbackType = k as WATCHER_CALLBACK_TYPE; /* set | update | delete */
-                    /* - */
                     for (let pathKey in paths) {
                         let currentPath = resolvePathFunc({ path: paths[pathKey] });
                         createWatcherFunc({
@@ -1984,10 +2001,97 @@ const preserveDATAFunc = (pandata: any): any => {
     const typ = getRealTypeFunc(pandata).type;
     const id = `$pre_${generateIdFunc()}`;
     if (['function', 'array', 'json'].includes(typ)) {
-        preserveDATA.current[id] = pandata;
+        preserveDATA.current.set(id, pandata);
         return id;
     }
     return pandata;
+};
+
+/** 
+* Serialize the whole store into a string that is safe to inline in a <script> tag (SSR -> browser). 
+* It reads the store itself, NOT get('*'): get('*') hands back what "preserve" holds (functions, class instances, 
+* cyclic objects...), which can't travel. Dropped on purpose: preserved values, and anything JSON can't carry 
+* (functions, symbols, bigint, NaN/Infinity). "onSkip" receives the dropped paths. 
+*/
+const dehydrateFunc = (onSkip?: (paths: string[]) => void): string => {
+    const flat = storeTopLevelDATA.current;
+    const skipped: string[] = [];
+    const SKIP = Symbol('skip');
+
+    /* Copy of a node, SKIP if nothing serializable is left in it */
+    const walk = (node: any, tokens: PATH_TOKEN[]): any => {
+        if (isContainerFunc(node)) {
+            if (isEmptyNodeFunc(node)) return Array.isArray(node) ? [] : {}; /* A real empty container, kept as-is */
+            if (Array.isArray(node)) {
+                const out: any[] = [];
+                for (let i = 0; i < node.length; i++) {
+                    tokens.push(i);
+                    out.push(walk(node[i], tokens));
+                    tokens.pop();
+                }
+                while (out.length > 0 && out[out.length - 1] === SKIP) out.pop();
+                if (out.length === 0) return SKIP;
+                return out.map((v) => v === SKIP ? null : v); /* A dropped item in the middle leaves a hole */
+            }
+            const out: JSON_DEFAULT_TYPE = {};
+            let count = 0;
+            const keys = Array.from((node as STORE_TREE_TYPE).keys());
+            for (let i = 0; i < keys.length; i++) {
+                tokens.push(keys[i]);
+                const v = walk(childOfFunc(node, keys[i]), tokens);
+                tokens.pop();
+                if (v === SKIP) continue;
+                out[keys[i]] = v;
+                count++;
+            }
+            return count === 0 ? SKIP : out;
+        }
+
+        /* A leaf */
+        const key = joinPathFunc(tokens);
+        if (!flat.has(key)) return SKIP; /* An array hole */
+        const t = typeof node;
+        if (node === null || t === 'boolean' || (t === 'number' && Number.isFinite(node))) return node;
+        if (t === 'string' && !node.startsWith('$pre_')) return node; /* "$pre_..." is a preserved reference */
+        skipped.push(key);
+        return SKIP;
+    };
+
+    const walked = walk(storeDATA.current, []);
+    const data = walked === SKIP ? {} : walked;
+
+    if (skipped.length > 0) {
+        logFunc('dehydrate() :: dropped (not serializable):', skipped);
+        if (onSkip) onSkip(skipped);
+    }
+
+    /* "<" would let the data close the <script> tag; U+2028/2029 break JS string literals in old engines */
+    return JSON.stringify(data)
+        .replace(/</g, '\\u003c')
+        .replace(/\u2028/g, '\\u2028')
+        .replace(/\u2029/g, '\\u2029');
+};
+
+/** 
+* Load a snapshot made by "dehydrate" into the store (browser side of SSR). 
+* Takes the string (or an already parsed object) and writes it through the regular "store" flow, 
+* so watchers and hooks are notified like for any other write. An empty snapshot is a no-op. 
+*/
+const hydrateFunc = (snapshot: string | JSON_DEFAULT_TYPE): FUNCTION_DEFAULT_RETURN_TYPE => {
+    const res: FUNCTION_DEFAULT_RETURN_TYPE = { ok: true, log: '', data: undefined };
+    try {
+        const data = typeof snapshot === 'string' ? JSON.parse(snapshot) : snapshot;
+        if (getRealTypeFunc(data).type !== 'json')
+            throw new Error('Invalid snapshot: expected a JSON object!');
+        if (Object.keys(data).length === 0)
+            return res;
+        return storeDataFunc(data);
+
+    } catch (e: any) {
+        res.ok = false;
+        res.log = e.message;
+    }
+    return res;
 };
 
 /*
@@ -2058,9 +2162,9 @@ const usePanda = (path: string | string[] | JSON_STRING_TYPE, state: PANDA_STORE
                 if (list[i] === '*') {
                     watchAll = true;
                     continue;
-                }
+                };
 
-                /* - */
+                /* Create watcher */
                 createWatcherFunc({
                     source: 'get',
                     path: formatPathFunc({ path: list[i], removeLastBracket: true }), /* Same format as the one used by "triggerUpdateFunc" */
@@ -2068,6 +2172,8 @@ const usePanda = (path: string | string[] | JSON_STRING_TYPE, state: PANDA_STORE
                     callback: onChange
                 });
             }
+
+            /* - */
             if (watchAll)
                 storeListeners.current.add(onChange);
 
@@ -2085,8 +2191,13 @@ const usePanda = (path: string | string[] | JSON_STRING_TYPE, state: PANDA_STORE
     const getSnapshot = useCallback(() => state.storeVersion.current, [state]);
     useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 
+    /* Multi-path reads ("[a, b]" / "{ x: a }") build a new array/object each time: keep the previous one if every value is the same */
+    const lastRef = useRef<any>(undefined);
+    const stable = shallowSameFunc(lastRef.current, data) ? lastRef.current : data;
+    lastRef.current = stable;
+
     /* Return pandata */
-    return data;
+    return stable;
 };
 
 /*
@@ -2131,22 +2242,19 @@ const Panda: MAIN_TYPE = {
         const next = {
             /* Store pandata */
             store(...x: STORE_ARG_TYPE): FUNCTION_DEFAULT_RETURN_TYPE {
-                const store = withPandaStoreState(state, () => storeDataFunc(...x));
-                return store;
+                return withPandaStoreState(state, () => storeDataFunc(...x));
             },
 
             /* Get pandata */
             get(path: '*' | GET_ARG_PATH_TYPE): any {
-                const get = withPandaStoreState(state, () => getDataFunc(path));
-                return get;
+                return withPandaStoreState(state, () => getDataFunc(path));
             },
 
             /* Watch pandata */
             watch(path: WATCH_ARG_TYPE): WATCH_RETURN_TYPE {
                 const wnext = {
                     on(callbacks: WATCH_ON_ARG_TYPE, watcherId: [string]): FUNCTION_DEFAULT_RETURN_TYPE {
-                        const watch = withPandaStoreState(state, () => watchDataFunc({ path, callbacks, watcherId: watcherId[0] }));
-                        return watch;
+                        return withPandaStoreState(state, () => watchDataFunc({ path, callbacks, watcherId: watcherId[0] }));
                     }
                 };
                 return wnext;
@@ -2157,23 +2265,24 @@ const Panda: MAIN_TYPE = {
                 withPandaStoreState(state, () => removeWatcherFunc({ watcherId }));
             },
 
-            /* Preserve pandata's references */
-            preserve(pandata: any): any {
-                const preserve = withPandaStoreState(state, () => preserveDATAFunc(pandata));
-                return preserve;
+            /* Dehydrate the store */
+            dehydrate(onSkip?: (paths: string[]) => void): string {
+                return withPandaStoreState(state, () => dehydrateFunc(onSkip));
             },
 
-            /* Generate ID */
-            genID(): string {
-                return generateIdFunc();
+            /* Hydrate the store */
+            hydrate(snapshot: string | JSON_DEFAULT_TYPE): FUNCTION_DEFAULT_RETURN_TYPE {
+                return withPandaStoreState(state, () => hydrateFunc(snapshot));
+            },
+
+            /* Preserve pandata's references */
+            preserve(pandata: any): any {
+                return withPandaStoreState(state, () => preserveDATAFunc(pandata));
             },
 
             /* Inspect shortcuts */
             inspectShortcuts(): JSON_DEFAULT_TYPE {
-                return withPandaStoreState(state, () => {
-                    inspectShortcutsFunc();
-                    return shortcutsDATA.current;
-                });
+                return withPandaStoreState(state, () => inspectShortcutsFunc());
             }
         };
         return next;
@@ -2192,10 +2301,11 @@ const Panda: MAIN_TYPE = {
 *
 * @example
 * type Schema = { user: { name: string, stack: string[] } };
-* export const { store, get, usePanda, watch, unwatch, preserve, genID, inspectShortcuts } = createPanda<Schema>();
+* export const { store, get, usePanda, watch, unwatch, preserve, inspectShortcuts, dehydrate, hydrate } = createPanda<Schema>();
 */
-export const createPanda = <T extends JSON_DEFAULT_TYPE = any>(): PandaTyped<T> => {
-    const state = ('window' in globalThis) ? sharedPandaStoreState : createPandaStoreState();
+const createPanda = <T extends JSON_DEFAULT_TYPE = any>(): PandaTyped<T> => {
+    const inBrowser = 'window' in globalThis;
+    const state = inBrowser ? sharedPandaStoreState : createPandaStoreState();
     const panda = Panda.init(state);
     const typed = {
         store: panda.store,
@@ -2204,10 +2314,15 @@ export const createPanda = <T extends JSON_DEFAULT_TYPE = any>(): PandaTyped<T> 
         watch: panda.watch,
         unwatch: panda.unwatch,
         preserve: panda.preserve,
-        genID: panda.genID,
+        dehydrate: panda.dehydrate,
+        hydrate: panda.hydrate,
         inspectShortcuts: panda.inspectShortcuts
     };
     return typed as unknown as PandaTyped<T>;
 };
-export default createPanda;
 
+/** Enable/disable Panda's internal debug logs */
+export const setPandaDebug = (enabled: boolean): void => { _dev_ = enabled };
+
+/* Default */
+export default createPanda;

@@ -53,6 +53,11 @@ type PANDA_TYPE = {
     preserve: (pandata: any) => any,
 
     /**
+    * GenID
+    */
+    genID: () => string,
+
+    /**
     * Inspect shortcuts
     */
     inspectShortcuts: () => JSON_DEFAULT_TYPE,
@@ -403,6 +408,9 @@ export interface PandaTyped<T> {
 
     /** Preserve pandata's references */
     preserve: <V extends object | Function>(pandata: V) => Preserved<V>;
+
+    /** Generate an ID */
+    genID: () => string;
 
     /** Inspect shortcuts */
     inspectShortcuts: () => { [shortcut: string]: PandaPaths<T> | undefined };
@@ -2280,6 +2288,11 @@ const Panda: MAIN_TYPE = {
                 return withPandaStoreState(state, () => preserveDATAFunc(pandata));
             },
 
+            /* Generate ID */
+            genID(): string {
+                return generateIdFunc();
+            },
+
             /* Inspect shortcuts */
             inspectShortcuts(): JSON_DEFAULT_TYPE {
                 return withPandaStoreState(state, () => inspectShortcutsFunc());
@@ -2301,7 +2314,7 @@ const Panda: MAIN_TYPE = {
 *
 * @example
 * type Schema = { user: { name: string, stack: string[] } };
-* export const { store, get, usePanda, watch, unwatch, preserve, inspectShortcuts, dehydrate, hydrate } = createPanda<Schema>();
+* export const { store, get, usePanda, watch, unwatch, preserve, genID, inspectShortcuts, dehydrate, hydrate } = createPanda<Schema>();
 */
 const createPanda = <T extends JSON_DEFAULT_TYPE = any>(): PandaTyped<T> => {
     const inBrowser = 'window' in globalThis;
@@ -2316,6 +2329,7 @@ const createPanda = <T extends JSON_DEFAULT_TYPE = any>(): PandaTyped<T> => {
         preserve: panda.preserve,
         dehydrate: panda.dehydrate,
         hydrate: panda.hydrate,
+        genID: panda.genID,
         inspectShortcuts: panda.inspectShortcuts
     };
     return typed as unknown as PandaTyped<T>;
